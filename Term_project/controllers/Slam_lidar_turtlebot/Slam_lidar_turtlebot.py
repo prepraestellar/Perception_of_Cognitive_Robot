@@ -11,8 +11,7 @@ class Map:
 
     def add_to_map(self, item: float, position: tuple[int, int]):
         if 0 <= position[0] < self.size[0] and 0 <= position[1] < self.size[1]:
-            if self.map[tuple(position)] != 1:
-                self.map[tuple(position)] += item 
+            self.map[tuple(position)] = min(1.0, self.map[tuple(position)] + item)
 
         # else:
         #     print(f"Warning: Position {position} is out of map bounds and will be ignored.")
@@ -34,7 +33,7 @@ class Object: # undone
             return False 
         
 class MyRobot:
-    def __init__(self, wheel_radius=0.033, axle_length=0.16, bot=None, supervisor=None):
+    def __init__(self, wheel_radius=0.033, axle_length=0.16, MAX_SPEED=6.28, bot=None, supervisor=None):
         self.robot = bot
         self.supervisor = supervisor
         self.time_step = int(self.supervisor.getBasicTimeStep())
@@ -50,6 +49,7 @@ class MyRobot:
         self.right_motor.setPosition(float('inf'))
         self.left_motor.setVelocity(0.0)
         self.right_motor.setVelocity(0.0)
+        self.MAX_SPEED = MAX_SPEED  # Max speed for the motors (1 rotation per second)
 
         self.wheel_radius = wheel_radius
         self.axle_length = axle_length
@@ -195,7 +195,7 @@ class MyRobot:
 
                     left_speed = 0.0
                     right_speed = 0.0
-                    speed = 6.28
+                    speed = self.MAX_SPEED
 
                     # Movement logic
                     if key in (ord('W'), ord('w')):
@@ -319,35 +319,73 @@ class MyRobot:
         return (float(position[0]), float(position[1]))
     
     def get_wall_position(self) -> list[tuple[float, float]]:
-        if not hasattr(self, 'lidar_values') or self.lidar_values is None:
-            return []
+        # if not hasattr(self, 'lidar_values') or self.lidar_values is None:
+        #     return []
     
-        wall_positions = []
-        robot_position = self.get_current_position() # Returns (World X, World Y)
+        # wall_positions = []
+        # robot_position = self.get_current_position() # Returns (World X, World Y)
         
-        # Get robot yaw (rotation around the vertical Y-axis)
-        rot = self.rot_field.getSFRotation()  # [ax, ay, az, angle]
-        robot_yaw = -rot[3] if rot[2] > 0 else rot[3]  
+        # # Get robot yaw (rotation around the vertical Y-axis)
+        # rot = self.rot_field.getSFRotation()  # [ax, ay, az, angle]
+        # robot_yaw = -rot[3] if rot[2] > 0 else rot[3]  
 
         
-        fov = self.lidar.getFov()
-        num_points = len(self.lidar_values)
+        # fov = self.lidar.getFov()
+        # num_points = len(self.lidar_values)
         
-        for i, distance in enumerate(self.lidar_values):
-            # Only map valid hits (ignore infinity, zero, or sensor errors)
-            if distance > 0 and not np.isinf(distance) and not np.isnan(distance):
+        
+        # for i, distance in enumerate(self.lidar_values):
+        #     # Only map valid hits (ignore infinity, zero, or sensor errors)
+        #     if distance > 0 and not np.isinf(distance) and not np.isnan(distance):
                 
-                # 1. Find the angle of this specific ray relative to the robot
-                ray_angle = -(fov / 2) + (i / (num_points - 1)) * fov
-                global_angle = robot_yaw + ray_angle
+        #         # 1. Find the angle of this specific ray relative to the robot
+        #         ray_angle = -(fov / 2) + (i / (num_points - 1)) * fov
+        #         global_angle = robot_yaw + ray_angle
                 
-                wall_x = robot_position[0] + distance * np.cos(global_angle)
-                wall_y = robot_position[1] - distance * np.sin(global_angle) 
+        #         wall_x = robot_position[0] + distance * np.cos(global_angle)
+        #         wall_y = robot_position[1] - distance * np.sin(global_angle) 
                 
-                # Append as (X, Y) to match your convert_to_map_coordinates function
-                wall_positions.append((wall_x, wall_y))
-                
-        return wall_positions
+        #         # Append as (X, Y) to match your convert_to_map_coordinates function
+        #         wall_positions.append((wall_x, wall_y))
+        # return wall_positions
+        if not hasattr(self, 'lidar_values') or self.lidar_values is None:
+            return []
+            
+        # 1. Convert lidar readings to a numpy array for fast operations
+        distances = np.array(self.lidar_values)
+        num_points = len(distances)
+        if num_points == 0:
+            return []
+
+        robot_position = self.get_current_position() # Returns (World X, World Y)
+        
+        # Get robot yaw
+        rot = self.rot_field.getSFRotation()  # [ax, ay, az, angle]
+        robot_yaw = -rot[3] if rot[2] > 0 else rot[3]  
+        
+        fov = self.lidar.getFov()
+        
+        # 2. Create a boolean mask of only the valid laser hits
+        valid_mask = (distances > 0) & ~np.isinf(distances) & ~np.isnan(distances)
+        
+        # 3. Generate all ray angles at once using linspace
+        # This replaces: -(fov / 2) + (i / (num_points - 1)) * fov
+        all_ray_angles = np.linspace(-fov / 2, fov / 2, num_points)
+        
+        # 4. Filter the distances and angles using our mask
+        valid_distances = distances[valid_mask]
+        valid_angles = all_ray_angles[valid_mask]
+        
+        # 5. Calculate global angles in one go
+        global_angles = robot_yaw + valid_angles
+        
+        # 6. Apply trigonometry to the entire array at once
+        wall_x = robot_position[0] + valid_distances * np.cos(global_angles)
+        wall_y = robot_position[1] - valid_distances * np.sin(global_angles) 
+        
+        # 7. Zip the X and Y arrays back into a list of tuples to match your existing code
+        return list(zip(wall_x, wall_y))
+    
 
     def convert_to_map_coordinates(self, position: tuple[float, float]) -> tuple[int, int]:
         scale_x = self.map.size[0] / self.map.world_size_m[0]
@@ -361,7 +399,7 @@ if __name__ == "__main__":
     supervisor = Supervisor()
     turtle_bot = MyRobot(wheel_radius=0.033, axle_length=0.16, bot=supervisor, supervisor=supervisor)
     turtle_bot.setmap(size=(1000, 1000), world_size_m=(4.0, 4.0))
-    world_map = turtle_bot.mapping(iteration=100000, verbose=0, teleop=True, show_display=True, proba_increase=0.1, threshold=0.95)
+    world_map = turtle_bot.mapping(iteration=100000, verbose=0, teleop=False, show_display=True, proba_increase=0.1, threshold=0.95)
     turtle_bot.draw_map(threshold=0.9) # Final map visualization with a threshold for occupied cells
 
     print('done')
