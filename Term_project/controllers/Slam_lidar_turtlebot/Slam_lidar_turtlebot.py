@@ -9,9 +9,11 @@ class Map:
         self.size = size
         self.world_size_m = world_size_m
 
-    def add_to_map(self, item: int, position: tuple[int, int]):
+    def add_to_map(self, item: float, position: tuple[int, int]):
         if 0 <= position[0] < self.size[0] and 0 <= position[1] < self.size[1]:
-            self.map[tuple(position)] = item 
+            if self.map[tuple(position)] != 1:
+                self.map[tuple(position)] += item 
+
         # else:
         #     print(f"Warning: Position {position} is out of map bounds and will be ignored.")
 
@@ -71,11 +73,20 @@ class MyRobot:
         self.keyboard = self.robot.getKeyboard()
         self.keyboard.enable(self.time_step)
 
+        # Cache for incremental display updates.
+        self._display_cache_initialized = False
+        self._last_map_binary = None
+        self._prev_robot_cell = None
+        self._last_display_size = None
+
     def setmap(self, size: tuple, world_size_m: tuple) -> Map:
         self.map = Map(size, world_size_m)
+        self._display_cache_initialized = False
+        self._last_map_binary = None
+        self._prev_robot_cell = None
         return self.map
 
-    def draw_map(self):
+    def draw_map(self, threshold=0.5):
         # 1. Safety check
         if self.display is None:
             return 
@@ -90,34 +101,66 @@ class MyRobot:
         cell_w = dw / cols
         cell_h = dh / rows
 
-        # 3. Clear the display with a white background first (faster than drawing empty cells)
-        self.display.setColor(0xFFFFFF) 
-        self.display.fillRectangle(0, 0, dw, dh)
+        # Use at least one pixel per cell to avoid empty draws on small displays.
+        px_w = max(1, int(round(cell_w)))
+        px_h = max(1, int(round(cell_h)))
 
-        # 4. Use the NumPy array as the reference to draw walls
-        self.display.setColor(0x000000) # Black for walls
-        
-        for row in range(rows):
-            for col in range(cols):
-                # Read directly from the numpy array
-                if self.map.map[row, col] == 1:
-                    # Translate NumPy [row, col] to Display [x, y]
-                    x_pixel = int(col * cell_w)
-                    y_pixel = int(row * cell_h)
-                    
-                    self.display.fillRectangle(x_pixel, y_pixel, int(cell_w), int(cell_h))
+        # Rebuild cache if first draw, map shape changed, or display size changed.
+        needs_reset = (
+            (not self._display_cache_initialized)
+            or self._last_map_binary is None
+            or self._last_map_binary.shape != self.map.map.shape
+            or self._last_display_size != (dw, dh)
+        )
 
-        # 5. Draw the robot position (Red)
-        self.display.setColor(0xFF0000)
-        
-        # Get robot coordinates (assuming your convert function returns [row, col])
+        current_binary = self.map.map >= threshold
+
+        if needs_reset:
+            self.display.setColor(0xFFFFFF)
+            self.display.fillRectangle(0, 0, dw, dh)
+            self._last_map_binary = np.zeros_like(current_binary, dtype=bool)
+            self._display_cache_initialized = True
+            self._prev_robot_cell = None
+            self._last_display_size = (dw, dh)
+
+        # Draw only cells whose occupancy changed since last frame.
+        changed = current_binary != self._last_map_binary
+        changed_rows, changed_cols = np.where(changed)
+
+        for row, col in zip(changed_rows, changed_cols):
+            x_pixel = int(col * cell_w)
+            y_pixel = int(row * cell_h)
+            if current_binary[row, col]:
+                self.display.setColor(0x000000)  # Wall
+            else:
+                self.display.setColor(0xFFFFFF)  # Free cell
+            self.display.fillRectangle(x_pixel, y_pixel, px_w, px_h)
+
+        self._last_map_binary = current_binary.copy()
+
+        # Restore the previous robot cell before drawing the new one.
+        if self._prev_robot_cell is not None:
+            pr, pc = self._prev_robot_cell
+            if 0 <= pr < rows and 0 <= pc < cols:
+                prev_x = int(pc * cell_w)
+                prev_y = int(pr * cell_h)
+                if current_binary[pr, pc]:
+                    self.display.setColor(0x000000)
+                else:
+                    self.display.setColor(0xFFFFFF)
+                self.display.fillRectangle(prev_x, prev_y, px_w, px_h)
+
+        # Draw the robot position (red).
         rx, ry = self.convert_to_map_coordinates(self.get_current_position())
         
-        # Make sure the robot is inside the numpy array bounds
         if 0 <= rx < rows and 0 <= ry < cols:
             robot_x = int(ry * cell_w) # Map ry (col) to x_pixel
             robot_y = int(rx * cell_h) # Map rx (row) to y_pixel
-            self.display.fillRectangle(robot_x, robot_y, int(cell_w), int(cell_h))
+            self.display.setColor(0xFF0000)
+            self.display.fillRectangle(robot_x, robot_y, px_w, px_h)
+            self._prev_robot_cell = (rx, ry)
+        else:
+            self._prev_robot_cell = None
 
     def inverse_kinematic(self, angle_deg, time):
         angle = np.deg2rad(angle_deg)   # convert to radians
@@ -127,100 +170,135 @@ class MyRobot:
         return vr, vl
     
     def random_direction(self):
-        return np.random.choice(['s', 'e', 'w', 'nw', 'ne', 'sw', 'se'])
+        # return np.random.choice(['s', 'e', 'w', 'nw', 'ne', 'sw', 'se'])
+        return np.random.choice(['s', 'sw', 'se'])
     
-    def mapping(self, iteration, verbose=100, teleop=False):
+    def mapping(self, iteration, verbose=100, teleop=False, show_display=True, proba_increase=0.1, threshold=0.5):
         if teleop:
-            for _ in tqdm(range(iteration)):
-                if self.supervisor.step(self.time_step) == -1:
-                    break
+            try:
+                for _ in tqdm(range(iteration)):
+                    if self.supervisor.step(self.time_step) == -1:
+                        break
 
-                # Read all queued keys and keep the latest one for this step
-                key = -1
-                k = self.keyboard.getKey()
-                while k != -1:
-                    key = k
-                    k = self.keyboard.getKey() # Updated inside the loop to avoid infinite loop
+                    # Read all queued keys and keep the latest one for this step
+                    key = -1
+                    k = self.keyboard.getKey()
+                    while k != -1:
+                        key = k
+                        k = self.keyboard.getKey() # Updated inside the loop to avoid infinite loop
 
-                left_speed = 0.0
-                right_speed = 0.0
-                speed = 6.28
+                    # --- WEBOTS KEYBOARD INTERRUPT ---
+                    # If 'Q' is the last key pressed, stop teleop mapping
+                    if key in (ord('Q'), ord('q')):
+                        print("\nTeleop mapping stopped manually via Webots (Q pressed). Continuing...")
+                        break
 
-                # Fixed indentation for the movement logic
-                if key in (ord('W'), ord('w')):
-                    left_speed = speed
-                    right_speed = speed
-                elif key in (ord('S'), ord('s')):
-                    left_speed = -speed
-                    right_speed = -speed
-                elif key in (ord('A'), ord('a')):
-                    left_speed = -speed
-                    right_speed = speed
-                elif key in (ord('D'), ord('d')):
-                    left_speed = speed
-                    right_speed = -speed
+                    left_speed = 0.0
+                    right_speed = 0.0
+                    speed = 6.28
 
-                self.left_motor.setVelocity(left_speed)
-                self.right_motor.setVelocity(right_speed)
+                    # Movement logic
+                    if key in (ord('W'), ord('w')):
+                        left_speed = speed
+                        right_speed = speed
+                    elif key in (ord('S'), ord('s')):
+                        left_speed = -speed
+                        right_speed = -speed
+                    elif key in (ord('A'), ord('a')):
+                        left_speed = -0.3 * speed
+                        right_speed = 0.3 * speed
+                    elif key in (ord('D'), ord('d')):
+                        left_speed = 0.3 * speed
+                        right_speed = -0.3 * speed
 
-                # Fixed indentation for the mapping logic
-                if key in (ord('S'), ord('s')) or key in (ord('W'), ord('w')) :
-                    # If turning, we might want to skip mapping to avoid noisy data
+                    self.left_motor.setVelocity(left_speed)
+                    self.right_motor.setVelocity(right_speed)
+
+                    # # Mapping logic
+                    # if key in (ord('S'), ord('s')) or key in (ord('W'), ord('w')) :
+                    #     # Only map when moving forward/backward, skip when turning (A/D)
                     self.read_distance_sensors()
                     wall_positions = self.get_wall_position()
                     for pos in wall_positions:
-                        self.map.add_to_map(1, self.convert_to_map_coordinates(pos))
+                        self.map.add_to_map(proba_increase, self.convert_to_map_coordinates(pos))
                     
-                        self.draw_map()
+                    if show_display:
+                        self.draw_map(threshold=threshold) # You can adjust the threshold for visualization
 
-            # Stop motors after the iterations are complete
+            # --- TERMINAL KEYBOARD INTERRUPT (CTRL+C) ---
+            except KeyboardInterrupt:
+                print("\nCtrl+C detected in terminal! Stopping teleop mapping early and continuing...")
+
+            # Stop motors after the iterations are complete or interrupted
             self.left_motor.setVelocity(0.0)
             self.right_motor.setVelocity(0.0)
             
             return self.map
         else:
-            for i in tqdm(range(iteration)):
-                if self.supervisor.step(self.time_step) == -1:
-                    break
+            try:
+                for i in tqdm(range(iteration)):
+                    if self.supervisor.step(self.time_step) == -1:
+                        break
 
-                # 1. Read sensors first
-                self.read_distance_sensors()
-                Obstacle = self.check_obstacle()
-                
-                if Obstacle:
-                    # --- TURNING STATE (NO MAPPING) ---
-                    direction = self.random_direction()  
-                    angle_deg = self.dir_dict[direction]
+                    # --- WEBOTS KEYBOARD INTERRUPT ---
+                    # Read the keyboard. If 'Q' is pressed in the Webots window, stop mapping.
+                    k = self.keyboard.getKey()
+                    # Clear out queued keys to get the latest one
+                    while k != -1:
+                        if k in (ord('Q'), ord('q')):
+                            print("\nMapping stopped manually via Webots (Q pressed). Continuing...")
+                            break # Break the while loop
+                        k = self.keyboard.getKey()
                     
-                    vr, vl = self.inverse_kinematic(angle_deg, 1.5)
-                    self.left_motor.setVelocity(vl)
-                    self.right_motor.setVelocity(vr)
-                    
-                    # Execute the turn
-                    steps_to_turn = int(1500 / self.time_step)
-                    for _ in range(steps_to_turn):
-                        self.supervisor.step(self.time_step)
-                        
-                    # Stop for just a few frames to let the robot's physics settle 
-                    # before taking the next map reading.
-                    self.left_motor.setVelocity(0.0)
-                    self.right_motor.setVelocity(0.0)
-                    for _ in range(100):
-                        self.supervisor.step(self.time_step)
-                        
-                else:
-                    # --- DRIVING STATE (MAPPING ENABLED) ---
-                    self.left_motor.setVelocity(6.28)
-                    self.right_motor.setVelocity(6.28)
-                    
-                    # Only calculate walls and map when moving straight
-                    wall_positions = self.get_wall_position()
-                    for pos in wall_positions:
-                        self.map.add_to_map(1, self.convert_to_map_coordinates(pos))
-                        
-                    self.draw_map()
+                    # If Q was pressed, break the main for-loop too
+                    if k in (ord('Q'), ord('q')):
+                        break
 
-            # End of iterations
+                    # 1. Read sensors first
+                    self.read_distance_sensors()
+                    Obstacle = self.check_obstacle()
+                    
+                    if Obstacle:
+                        # --- TURNING STATE (NO MAPPING) ---
+                        direction = self.random_direction()  
+                        angle_deg = self.dir_dict[direction]
+                        
+                        vr, vl = self.inverse_kinematic(angle_deg, 1.5)
+                        self.left_motor.setVelocity(vl)
+                        self.right_motor.setVelocity(vr)
+                        
+                        # Execute the turn
+                        steps_to_turn = int(1500 / self.time_step)
+                        for _ in range(steps_to_turn):
+                            if self.supervisor.step(self.time_step) == -1:
+                                break
+                            
+                        # Stop for just a few frames to let the robot's physics settle 
+                        self.left_motor.setVelocity(0.0)
+                        self.right_motor.setVelocity(0.0)
+                        for _ in range(5):
+                            if self.supervisor.step(self.time_step) == -1:
+                                break
+                            
+                    else:
+                        # --- DRIVING STATE (MAPPING ENABLED) ---
+                        self.left_motor.setVelocity(6.28)
+                        self.right_motor.setVelocity(6.28)
+                        
+                        # Only calculate walls and map when moving straight
+                        wall_positions = self.get_wall_position()
+                        for pos in wall_positions:
+                            self.map.add_to_map(proba_increase, self.convert_to_map_coordinates(pos))
+                        
+                        if show_display:
+                            self.draw_map(threshold=threshold) # You can adjust the threshold for visualization
+
+            # --- TERMINAL KEYBOARD INTERRUPT (CTRL+C) ---
+            except KeyboardInterrupt:
+                print("\nCtrl+C detected in terminal! Stopping mapping early and continuing...")
+
+            # End of iterations or Interrupted
+            # Safely stop motors and return the map to the main script
             self.left_motor.setVelocity(0)
             self.right_motor.setVelocity(0)
             return self.map
@@ -234,7 +312,7 @@ class MyRobot:
         # Check only a narrow cone in front of the robot
         num_points = len(self.lidar_values)
         front_cone = self.lidar_values[num_points//2 - 50 : num_points//2 + 50] 
-        return any(0 < v < 0.15 for v in front_cone if not np.isinf(v))
+        return any(0 < v < 0.3 for v in front_cone if not np.isinf(v))
 
     def get_current_position(self) -> tuple[float, float]:
         position = self.trans_field.getSFVec3f()
@@ -253,7 +331,6 @@ class MyRobot:
 
         
         fov = self.lidar.getFov()
-        print(f"LiDAR FOV: {np.rad2deg(fov):.2f} degrees")
         num_points = len(self.lidar_values)
         
         for i, distance in enumerate(self.lidar_values):
@@ -283,7 +360,8 @@ class MyRobot:
 if __name__ == "__main__":
     supervisor = Supervisor()
     turtle_bot = MyRobot(wheel_radius=0.033, axle_length=0.16, bot=supervisor, supervisor=supervisor)
-    turtle_bot.setmap(size=(50, 50), world_size_m=(4.0, 4.0))
-    world_map = turtle_bot.mapping(iteration=100000, verbose=0, teleop=True)
+    turtle_bot.setmap(size=(1000, 1000), world_size_m=(4.0, 4.0))
+    world_map = turtle_bot.mapping(iteration=100000, verbose=0, teleop=True, show_display=True, proba_increase=0.1, threshold=0.95)
+    turtle_bot.draw_map(threshold=0.9) # Final map visualization with a threshold for occupied cells
 
     print('done')
