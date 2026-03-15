@@ -176,9 +176,14 @@ class MyRobot:
     def mapping(self, iteration, verbose=100, teleop=False, show_display=True, proba_increase=0.1, threshold=0.5):
         if teleop:
             try:
-                for _ in tqdm(range(iteration)):
+                # Removed tqdm, added 'i' to track the current loop number
+                for i in range(iteration):
                     if self.supervisor.step(self.time_step) == -1:
                         break
+
+                    # --- PROGRESS PRINT ---
+                    if verbose > 0 and i % verbose == 0:
+                        print(f"Teleop Mapping: {i}/{iteration} steps ({(i/iteration)*100:.1f}%)")
 
                     # Read all queued keys and keep the latest one for this step
                     key = -1
@@ -214,16 +219,14 @@ class MyRobot:
                     self.left_motor.setVelocity(left_speed)
                     self.right_motor.setVelocity(right_speed)
 
-                    # # Mapping logic
-                    # if key in (ord('S'), ord('s')) or key in (ord('W'), ord('w')) :
-                    #     # Only map when moving forward/backward, skip when turning (A/D)
+                    # Mapping logic
                     self.read_distance_sensors()
                     wall_positions = self.get_wall_position()
                     for pos in wall_positions:
                         self.map.add_to_map(proba_increase, self.convert_to_map_coordinates(pos))
                     
                     if show_display:
-                        self.draw_map(threshold=threshold) # You can adjust the threshold for visualization
+                        self.draw_map(threshold=threshold) 
 
             # --- TERMINAL KEYBOARD INTERRUPT (CTRL+C) ---
             except KeyboardInterrupt:
@@ -236,21 +239,23 @@ class MyRobot:
             return self.map
         else:
             try:
-                for i in tqdm(range(iteration)):
+                # Removed tqdm here as well
+                for i in range(iteration):
                     if self.supervisor.step(self.time_step) == -1:
                         break
 
+                    # --- PROGRESS PRINT ---
+                    if verbose > 0 and i % verbose == 0:
+                        print(f"Auto Mapping: {i}/{iteration} steps ({(i/iteration)*100:.1f}%)")
+
                     # --- WEBOTS KEYBOARD INTERRUPT ---
-                    # Read the keyboard. If 'Q' is pressed in the Webots window, stop mapping.
                     k = self.keyboard.getKey()
-                    # Clear out queued keys to get the latest one
                     while k != -1:
                         if k in (ord('Q'), ord('q')):
                             print("\nMapping stopped manually via Webots (Q pressed). Continuing...")
-                            break # Break the while loop
+                            break 
                         k = self.keyboard.getKey()
                     
-                    # If Q was pressed, break the main for-loop too
                     if k in (ord('Q'), ord('q')):
                         break
 
@@ -291,14 +296,13 @@ class MyRobot:
                             self.map.add_to_map(proba_increase, self.convert_to_map_coordinates(pos))
                         
                         if show_display:
-                            self.draw_map(threshold=threshold) # You can adjust the threshold for visualization
+                            self.draw_map(threshold=threshold) 
 
             # --- TERMINAL KEYBOARD INTERRUPT (CTRL+C) ---
             except KeyboardInterrupt:
                 print("\nCtrl+C detected in terminal! Stopping mapping early and continuing...")
 
             # End of iterations or Interrupted
-            # Safely stop motors and return the map to the main script
             self.left_motor.setVelocity(0)
             self.right_motor.setVelocity(0)
             return self.map
@@ -399,7 +403,6 @@ if __name__ == "__main__":
     supervisor = Supervisor()
     turtle_bot = MyRobot(wheel_radius=0.033, axle_length=0.16, bot=supervisor, supervisor=supervisor)
     turtle_bot.setmap(size=(1000, 1000), world_size_m=(4.0, 4.0))
-    world_map = turtle_bot.mapping(iteration=100000, verbose=0, teleop=False, show_display=True, proba_increase=0.1, threshold=0.95)
-    turtle_bot.draw_map(threshold=0.9) # Final map visualization with a threshold for occupied cells
-
+    world_map = turtle_bot.mapping(iteration=100000, verbose=100, teleop=False, show_display=True, proba_increase=0.1, threshold=0.95)
+    turtle_bot.draw_map(threshold=0.1) # Final map visualization with a threshold for occupied cells
     print('done')
