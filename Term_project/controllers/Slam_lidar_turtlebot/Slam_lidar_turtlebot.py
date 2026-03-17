@@ -468,7 +468,7 @@ class MyRobot:
 
 if __name__ == "__main__":
     supervisor = Supervisor()
-    turtle_bot = MyRobot(wheel_radius=0.033, axle_length=0.16, bot=supervisor, supervisor=supervisor, use_supervisor=True)
+    turtle_bot = MyRobot(wheel_radius=0.033, axle_length=0.16, bot=supervisor, supervisor=supervisor, use_supervisor=False)
     turtle_bot.setmap(size=(1000, 1000), world_size_m=(4.0, 4.0))
     world_map = turtle_bot.mapping(iteration=100000, verbose=100, teleop=False, show_display=True, proba_increase=0.1, threshold=0.95)
     turtle_bot.draw_map(threshold=0.1) # Final map visualization with a threshold for occupied cells
