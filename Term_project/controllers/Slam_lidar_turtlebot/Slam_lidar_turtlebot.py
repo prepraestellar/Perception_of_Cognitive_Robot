@@ -1,6 +1,5 @@
 import numpy as np
 from controller import Supervisor
-from tqdm import tqdm
 import math
 
 class Map:
@@ -33,7 +32,7 @@ class Object: # undone
             return False 
         
 class MyRobot:
-    def __init__(self, wheel_radius=0.033, axle_length=0.16, MAX_SPEED=6.28, bot=None, supervisor=None):
+    def __init__(self, wheel_radius=0.033, axle_length=0.16, MAX_SPEED=6.28, bot=None, supervisor=None, use_supervisor = True):
         self.robot = bot
         self.supervisor = supervisor
         self.time_step = int(self.supervisor.getBasicTimeStep())
@@ -50,6 +49,29 @@ class MyRobot:
         self.left_motor.setVelocity(0.0)
         self.right_motor.setVelocity(0.0)
         self.MAX_SPEED = MAX_SPEED  # Max speed for the motors (1 rotation per second)
+
+        self.use_supervisor = use_supervisor
+
+        # Encoders
+        self.left_encoder = self.robot.getDevice('left wheel sensor')
+        self.right_encoder = self.robot.getDevice('right wheel sensor')
+        self.left_encoder.enable(self.time_step)
+        self.right_encoder.enable(self.time_step)
+
+        #Gyro
+        self.gyro = self.robot.getDevice('gyro')
+        self.gyro.enable(self.time_step)
+
+        # Compass
+        self.compass = self.robot.getDevice('compass')
+        self.compass.enable(self.time_step)
+
+        # Odom state
+        self.x = 0.0
+        self.y = 0.0
+        self.theta = 0.0
+        self.prev_left_enc = 0.0
+        self.prev_right_enc = 0.0
 
         self.wheel_radius = wheel_radius
         self.axle_length = axle_length
@@ -180,7 +202,7 @@ class MyRobot:
                 for i in range(iteration):
                     if self.supervisor.step(self.time_step) == -1:
                         break
-
+                    self.update_odometry()
                     # --- PROGRESS PRINT ---
                     if verbose > 0 and i % verbose == 0:
                         print(f"Teleop Mapping: {i}/{iteration} steps ({(i/iteration)*100:.1f}%)")
@@ -243,7 +265,7 @@ class MyRobot:
                 for i in range(iteration):
                     if self.supervisor.step(self.time_step) == -1:
                         break
-
+                    self.update_odometry()
                     # --- PROGRESS PRINT ---
                     if verbose > 0 and i % verbose == 0:
                         print(f"Auto Mapping: {i}/{iteration} steps ({(i/iteration)*100:.1f}%)")
@@ -277,6 +299,7 @@ class MyRobot:
                         for _ in range(steps_to_turn):
                             if self.supervisor.step(self.time_step) == -1:
                                 break
+                            self.update_odometry()
                             
                         # Stop for just a few frames to let the robot's physics settle 
                         self.left_motor.setVelocity(0.0)
@@ -284,7 +307,7 @@ class MyRobot:
                         for _ in range(5):
                             if self.supervisor.step(self.time_step) == -1:
                                 break
-                            
+                            self.update_odometry()
                     else:
                         # --- DRIVING STATE (MAPPING ENABLED) ---
                         self.left_motor.setVelocity(6.28)
@@ -319,8 +342,44 @@ class MyRobot:
         return any(0 < v < 0.3 for v in front_cone if not np.isinf(v))
 
     def get_current_position(self) -> tuple[float, float]:
-        position = self.trans_field.getSFVec3f()
-        return (float(position[0]), float(position[1]))
+        if self.use_supervisor:
+            position = self.trans_field.getSFVec3f()
+            return (float(position[0]), float(position[1]))
+        else:
+            return (self.x, self.y)
+
+    def update_odometry(self):
+        # Temporary debug — remove after
+        # compass_vals = self.compass.getValues()
+        # rot = self.rot_field.getSFRotation()
+        # supervisor_yaw = -rot[3] if rot[2] > 0 else rot[3]
+        # compass_yaw = -math.atan2(compass_vals[0], compass_vals[1])
+        # print("-"*50)
+        # print(f"compass raw:     {compass_vals}")
+        # print(f"rot raw:         {rot}")
+        # print(f"supervisor yaw:  {math.degrees(supervisor_yaw):.2f} deg")
+        # print(f"compass yaw:     {math.degrees(compass_yaw):.2f} deg")
+
+        # 1. Read encoders
+        left_enc  = self.left_encoder.getValue()
+        right_enc = self.right_encoder.getValue()
+
+        # 2. Delta since last step → convert to meters
+        d_left  = (left_enc  - self.prev_left_enc)  * self.wheel_radius
+        d_right = (right_enc - self.prev_right_enc) * self.wheel_radius
+        self.prev_left_enc  = left_enc
+        self.prev_right_enc = right_enc
+
+        # 3. Get heading from compass (no drift)
+        compass_vals = self.compass.getValues()
+        self.theta = math.atan2(compass_vals[0], compass_vals[1])
+
+        # 4. Forward displacement
+        d_center = (d_right + d_left) / 2.0
+
+        # 5. Integrate position
+        self.x += d_center * math.cos(self.theta)
+        self.y += d_center * math.sin(self.theta)
     
     def get_wall_position(self) -> list[tuple[float, float]]:
         # if not hasattr(self, 'lidar_values') or self.lidar_values is None:
@@ -363,9 +422,17 @@ class MyRobot:
 
         robot_position = self.get_current_position() # Returns (World X, World Y)
         
-        # Get robot yaw
-        rot = self.rot_field.getSFRotation()  # [ax, ay, az, angle]
-        robot_yaw = -rot[3] if rot[2] > 0 else rot[3]  
+        # Get robot yaw with odom / supervisor
+        #if self.use_supervisor:
+        ##rot = self.rot_field.getSFRotation()
+        ##robot_yaw = -rot[3] if rot[2] > 0 else rot[3]
+        #else:
+        #    robot_yaw = self.theta
+        if self.use_supervisor:
+            rot = self.rot_field.getSFRotation()
+            robot_yaw = -rot[3] if rot[2] > 0 else rot[3]
+        else:
+            robot_yaw = -self.theta
         
         fov = self.lidar.getFov()
         
@@ -401,7 +468,7 @@ class MyRobot:
 
 if __name__ == "__main__":
     supervisor = Supervisor()
-    turtle_bot = MyRobot(wheel_radius=0.033, axle_length=0.16, bot=supervisor, supervisor=supervisor)
+    turtle_bot = MyRobot(wheel_radius=0.033, axle_length=0.16, bot=supervisor, supervisor=supervisor, use_supervisor=True)
     turtle_bot.setmap(size=(1000, 1000), world_size_m=(4.0, 4.0))
     world_map = turtle_bot.mapping(iteration=100000, verbose=100, teleop=False, show_display=True, proba_increase=0.1, threshold=0.95)
     turtle_bot.draw_map(threshold=0.1) # Final map visualization with a threshold for occupied cells
