@@ -1,3 +1,14 @@
+
+# step 1: camera checking -> if not moving -> collect as coordinate in dictionary
+# step 2: do the node - dictionary: key = coordinate (x,y), value = probability of being a wall
+# - if the position of the calculated path is in the dictionary and value < threshold (not the wall), then you can move there -> this is implicitly the edge of the graph
+# step 3: frontier detection: coordinate that is not in the dictionary  
+# Step 4: Utility Calculation -> it needs to decide which frontier to go to -> calculate the utility of each frontier and choose the one with the highest utility as the goal
+# - cost function: utility = information gain - distance cost
+#   - distance cost = the distance from the current position to the frontier (the closer, the better)
+#   - information gain = the amount of new area that can be explored from that frontier (the more, the better)
+# step 5: calculate the algorithm = A* -> find the path from start to frontier for each position you are in 
+
 import numpy as np
 import math
 import heapq
