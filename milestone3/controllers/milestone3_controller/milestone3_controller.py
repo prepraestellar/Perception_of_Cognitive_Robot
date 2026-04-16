@@ -310,12 +310,11 @@ from controller import Supervisor
 # PART 1: PERCEPTION SYSTEM (From Milestone 1)
 # ==========================================================
 class PerceptionSystem:
-    def __init__(self, threshold_motion=6.0):
+    def __init__(self, threshold_motion=0.6):
         self.prev_gray = None
         self.threshold_motion = threshold_motion
 
     def process_frame(self, frame_rgb):
-        # แปลงเป็น Grayscale
         gray = np.dot(frame_rgb[..., :3], [0.299, 0.587, 0.114])
         
         if self.prev_gray is None:
@@ -425,31 +424,52 @@ class MyRobot:
         return False
 
     def mapping_logic(self):
-        """ ฟังก์ชันหลักในการอ่านเซนเซอร์และบันทึกแผนที่ลง Dictionary """
-        # 1. Perception Frame Processing
+        # 1. ดึงข้อมูลพื้นฐาน
         img_raw = self.camera.getImageArray()
         motion_mask = self.perception.process_frame(np.array(img_raw))
-
-        # 2. LiDAR Scanning
         lidar_ranges = self.lidar.getRangeImage()
-        fov = self.lidar.getFov()
+        
+        # ดึงค่า FOV ของเซนเซอร์ทั้งสองตัว
+        lidar_fov = self.lidar.getFov()
+        cam_fov = self.camera.getFov()
+        
         rx, ry, ryaw = self.get_pose()
-
-        # 3. Sensor Fusion & Map Update
         num_points = len(lidar_ranges)
+
+        # 2. เริ่มวนลูปประมวลผล LiDAR ทุกเส้น (360 องศา)
         for i, dist in enumerate(lidar_ranges):
-            if dist <= 0 or np.isinf(dist) or dist > 3.0: continue
+            # ข้ามค่าที่ผิดพลาดหรือไกลเกินไป
+            if dist <= 0 or np.isinf(dist) or dist > 3.5: continue
             
-            ray_angle = -(fov / 2) + (i / (num_points - 1)) * fov
+            # คำนวณมุมของ Ray เส้นนี้เทียบกับตัวหุ่นยนต์
+            ray_angle = -(lidar_fov / 2) + (i / (num_points - 1)) * lidar_fov
+
+            # ==========================================================
+            # STEP A: OBSTACLE AVOIDANCE (สำหรับความปลอดภัย - ใช้ 360 องศา)
+            # ==========================================================
+            # คุณสามารถเช็คตรงนี้ได้เลยว่ามีอะไรใกล้หุ่นยนต์ไหม (ทุกทิศทาง)
+            if dist < 0.25:
+                # ตัวอย่าง: สั่งหยุดหรือตั้ง Flag ว่ามีสิ่งกีดขวางใกล้ตัว
+                self.near_obstacle = True 
+
+            # ==========================================================
+            # STEP B: MAPPING WITH SENSOR FUSION (เฉพาะด้านหน้าที่มีกล้อง)
+            # ==========================================================
+            # เช็คว่า Ray เส้นนี้ "อยู่ในขอบเขตที่กล้องมองเห็น" หรือไม่
+            if abs(ray_angle) < (cam_fov / 2):
+                
+                # --- ตรวจสอบ Motion (Requirement #2) ---
+                # ถ้าอยู่ในหน้ากล้อง และ "นิ่งสนิท" (ไม่มี Motion) ถึงจะวาดลงแผนที่
+                if not self.filter_moving_lidar(ray_angle, motion_mask):
+                    # คำนวณพิกัดโลก
+                    wx = rx + dist * math.cos(ryaw + ray_angle)
+                    wy = ry - dist * math.sin(ryaw + ray_angle)
+                    
+                    # บันทึกลง Dictionary Map
+                    self.graph_map.add_to_map(wx, wy, 0.1)
             
-            # --- Requirement #2: กรองวัตถุเคลื่อนที่ออก ---
-            if self.filter_moving_lidar(ray_angle, motion_mask):
-                continue # ข้าม ไม่บันทึกกำแพงที่กำลังขยับ
-            
-            # คำนวณพิกัดโลก
-            wx = rx + dist * math.cos(ryaw + ray_angle)
-            wy = ry - dist * math.sin(ryaw + ray_angle) 
-            self.graph_map.add_to_map(wx, wy, 0.1)
+            # ถ้า abs(ray_angle) >= (cam_fov / 2) คืออยู่นอกเขตกล้อง
+            # เราจะ "ไม่ทำอะไร" (Skip) ในส่วนของ Mapping เพื่อให้แผนที่สะอาด
 
     def draw_map(self):
         if not hasattr(self, 'display') or not self.display: 
