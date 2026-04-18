@@ -2,8 +2,10 @@ import numpy as np
 
 RESIZE_H = 150
 RESIZE_W = 150
-DIFF_THRESHOLD = 120
-EDGE_THRESHOLD = 75
+N_COLS = 32          # column blocks — finer blocks (8 cam-px each) = less wall bleed
+FLOW_THRESHOLD = 1.5 # per-pixel flow magnitude threshold (px/frame)
+_LK_WIN = 5          # LK window size for per-pixel structure tensor
+_DET_MIN = 50.0      # minimum det — lower catches weaker ball-edge pixels
 
 _GAUSSIAN = np.array([[1, 2, 1], [2, 4, 2], [1, 2, 1]], dtype=np.float64) / 16.0
 _SOBEL_V  = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=np.float64)
@@ -23,32 +25,21 @@ def get_blocked_columns(frame1_bgra, frame2_bgra, cam_w):
     f2 = _resize(frame2_bgra).astype(np.float64)
 
     # BGRA: channel 2 = R, 1 = G, 0 = B
-    f1_gray   = 0.299 * f1[:,:,2] + 0.587 * f1[:,:,1] + 0.114 * f1[:,:,0]
-    f2_gray   = 0.299 * f2[:,:,2] + 0.587 * f2[:,:,1] + 0.114 * f2[:,:,0]
+    f1_gray = 0.299 * f1[:, :, 2] + 0.587 * f1[:, :, 1] + 0.114 * f1[:, :, 0]
+    f2_gray = 0.299 * f2[:, :, 2] + 0.587 * f2[:, :, 1] + 0.114 * f2[:, :, 0]
 
-    f1_blur   = _convolve(_GAUSSIAN, f1_gray)
-    f2_blur   = _convolve(_GAUSSIAN, f2_gray)
+    f1_blur = _convolve(_GAUSSIAN, f1_gray)
+    f2_blur = _convolve(_GAUSSIAN, f2_gray)
 
-    # Frame-difference mask: pixels that changed significantly
-    diff_mask = (f2_blur - f1_blur) > DIFF_THRESHOLD
+    # _lk_column_flows returns flows with interior-fill already applied
+    flows = _lk_column_flows(f1_blur, f2_blur, N_COLS)
 
-    # Edge detection on frame2 across all channels
-    edge_sum = np.zeros((RESIZE_H, RESIZE_W), dtype=np.uint8)
-    for ch in (0, 1, 2):  # B, G, R
-        ch_blur = _convolve(_GAUSSIAN, f2[:,:,ch])
-        edge_sum += (_edges(ch_blur) > EDGE_THRESHOLD).astype(np.uint8)
-    edge_sum += (_edges(f2_blur) > EDGE_THRESHOLD).astype(np.uint8)
-
-    # Group interior regions (zero-edge pixels) into blobs
-    blobs = _blobize(edge_sum)
-
-    # A blob is "moving" if any of its pixels overlap the diff mask
-    diff_set = set(zip(*np.where(diff_mask))) if diff_mask.any() else set()
-    blocked  = set()
-    for blob in blobs:
-        if blob & diff_set:
-            for (_, c) in blob:
-                blocked.add(int(c * cam_w / RESIZE_W))
+    blocked = set()
+    col_w = RESIZE_W // N_COLS
+    for k, mag in enumerate(flows):
+        if mag > FLOW_THRESHOLD:
+            for res_col in range(k * col_w, (k + 1) * col_w):
+                blocked.add(int(res_col * cam_w / RESIZE_W))
 
     return blocked
 
@@ -66,7 +57,7 @@ def _resize(img):
 
 
 def _convolve(kernel, array):
-    """Vectorised 2-D convolution (much faster than pixel-by-pixel loops)."""
+    """Vectorised 2-D convolution."""
     kh, kw = kernel.shape
     ph, pw = kh // 2, kw // 2
     padded = np.pad(array, ((ph, ph), (pw, pw)), mode='constant')
@@ -77,36 +68,55 @@ def _convolve(kernel, array):
     return out
 
 
-def _edges(blurred):
-    """Sobel edge magnitude."""
-    return np.sqrt(_convolve(_SOBEL_V, blurred)**2 + _convolve(_SOBEL_H, blurred)**2)
-
-
-def _blobize(edge_map):
+def _lk_column_flows(gray1, gray2, n_cols):
     """
-    Flood-fill connected regions of NON-edge (zero) pixels.
-    Each blob is a set of (row, col) representing one interior region.
+    Per-pixel Lucas-Kanade optical flow using a _LK_WIN x _LK_WIN structure tensor.
+    Solves per pixel: [Sxx Sxy][u] = [-Sxt]
+                      [Sxy Syy][v]   [-Syt]
+
+    After computing per-block max flow, fills the contiguous span between the
+    outermost hot blocks (±1 block margin) so the ball interior — which has no
+    spatial gradient and therefore no valid LK estimate — is covered without
+    expanding into unrelated wall regions.
     """
-    rows, cols = edge_map.shape
-    visited = np.zeros((rows, cols), dtype=bool)
-    blobs   = []
+    Ix = _convolve(_SOBEL_V, gray2)   # dI/dx
+    Iy = _convolve(_SOBEL_H, gray2)   # dI/dy
+    It = gray2 - gray1                 # dI/dt
 
-    for i in range(rows):
-        for j in range(cols):
-            if edge_map[i, j] != 0 or visited[i, j]:
-                continue
-            blob  = set()
-            stack = [(i, j)]
-            while stack:
-                x, y = stack.pop()
-                if x < 0 or x >= rows or y < 0 or y >= cols:
-                    continue
-                if visited[x, y] or edge_map[x, y] != 0:
-                    continue
-                visited[x, y] = True
-                blob.add((x, y))
-                stack.extend([(x+1,y),(x-1,y),(x,y+1),(x,y-1)])
-            if blob:
-                blobs.append(blob)
+    # Accumulate structure tensor over _LK_WIN x _LK_WIN window per pixel
+    ones = np.ones((_LK_WIN, _LK_WIN), dtype=np.float64)
+    Sxx = _convolve(ones, Ix * Ix)
+    Sxy = _convolve(ones, Ix * Iy)
+    Syy = _convolve(ones, Iy * Iy)
+    Sxt = _convolve(ones, Ix * It)
+    Syt = _convolve(ones, Iy * It)
 
-    return blobs
+    det = Sxx * Syy - Sxy ** 2
+    valid = det > _DET_MIN   # reject featureless / ill-conditioned pixels
+
+    safe_det = np.where(valid, det, 1.0)
+    u = np.where(valid, (-Syy * Sxt + Sxy * Syt) / safe_det, 0.0)
+    v = np.where(valid, ( Sxy * Sxt - Sxx * Syt) / safe_det, 0.0)
+    mag = np.sqrt(u ** 2 + v ** 2)
+
+    col_w = RESIZE_W // n_cols
+    flows = np.zeros(n_cols, dtype=np.float64)
+    for k in range(n_cols):
+        c0, c1 = k * col_w, (k + 1) * col_w
+        flows[k] = float(np.max(mag[:, c0:c1]))
+
+    # Interior fill: find the outermost hot blocks and fill everything between
+    # them (plus ±1 block margin).  LK only fires at the ball's corner pixels;
+    # the uniform interior has det≈0 and contributes nothing.  Filling in block
+    # space (each block ≈ CAM_W/N_COLS camera pixels wide) keeps the expansion
+    # tightly scoped to the ball, unlike a raw pixel-level dilation.
+    hot = [k for k in range(n_cols) if flows[k] > FLOW_THRESHOLD]
+    if hot:
+        lo = max(0, hot[0] - 1)
+        hi = min(n_cols - 1, hot[-1] + 1)
+        fill_val = FLOW_THRESHOLD + 0.1
+        for k in range(lo, hi + 1):
+            if flows[k] <= FLOW_THRESHOLD:
+                flows[k] = fill_val
+
+    return flows

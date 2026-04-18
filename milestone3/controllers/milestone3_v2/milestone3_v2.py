@@ -33,6 +33,17 @@ class GraphMap:
         key = self.world_to_grid(wx, wy)
         self.nodes[key] = min(1.0, self.nodes.get(key, 0.0) + increment)
 
+    def decay(self, rate=0.003):
+        """Subtract rate from every cell each step.
+        Real walls are re-mapped continuously and stay near 1.0.
+        Ball leaks (1-2 frames, probability 0.1-0.2) fade to 0 in ~70 steps (~2 s).
+        """
+        to_delete = [k for k, v in self.nodes.items() if v <= rate]
+        for k in to_delete:
+            del self.nodes[k]
+        for k in self.nodes:
+            self.nodes[k] = max(0.0, self.nodes[k] - rate)
+
     def is_occupied(self, gx, gy, threshold=0.5):
         val = self.nodes.get((gx, gy))
         if val is None:
@@ -125,7 +136,9 @@ class MyRobot:
 
         # --- Systems ---
         self.graph_map  = GraphMap(resolution=0.05)
-        self.prev_frame = None
+        self.prev_frame      = None
+        self._blocked_buffer = []
+        self._BLOCK_HISTORY  = 5    # union of last 8 frames (~256 ms)
 
         # Store starting grid cell for utility scoring
         rx, ry, _ = self.get_pose()
@@ -448,8 +461,15 @@ class MyRobot:
             blocked_cols = get_blocked_columns(self.prev_frame, img, self.camera.getWidth())
             self.prev_frame = img
 
-            # 2. Update map (camera-gated LiDAR)
-            self.update_map(blocked_cols)
+            # Union of last _BLOCK_HISTORY frames so a stationary ball stays blocked
+            self._blocked_buffer.append(blocked_cols)
+            if len(self._blocked_buffer) > self._BLOCK_HISTORY:
+                self._blocked_buffer.pop(0)
+            effective_blocked = set().union(*self._blocked_buffer)
+
+            # 2. Update map (camera-gated LiDAR) then decay stale cells
+            self.update_map(effective_blocked)
+            self.graph_map.decay()
 
             # 3. Draw map every 5 steps
             if step % 5 == 0:
