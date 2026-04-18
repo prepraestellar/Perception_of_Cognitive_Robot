@@ -231,6 +231,81 @@ Solid {
     mass 1
   }
 }
+DEF BALL_RED Solid {
+  translation 1.0 0.3 0.10
+  children [
+    DEF BALL_RED_SHAPE Shape {
+      appearance PBRAppearance {
+        baseColor 1 0 0
+        roughness 1
+        metalness 0
+      }
+      geometry Sphere {
+        radius 0.10
+      }
+    }
+  ]
+  name "ball_red"
+  contactMaterial "bouncy"
+  boundingObject USE BALL_RED_SHAPE
+  physics Physics {
+    damping Damping {
+      linear 0
+      angular 0
+    }
+  }
+  linearVelocity 0.4 0.3 0
+}
+DEF BALL_BLUE Solid {
+  translation -1.2 -1.0 0.10
+  children [
+    DEF BALL_BLUE_SHAPE Shape {
+      appearance PBRAppearance {
+        baseColor 0 0.4 1
+        roughness 1
+        metalness 0
+      }
+      geometry Sphere {
+        radius 0.10
+      }
+    }
+  ]
+  name "ball_blue"
+  contactMaterial "bouncy"
+  boundingObject USE BALL_BLUE_SHAPE
+  physics Physics {
+    damping Damping {
+      linear 0
+      angular 0
+    }
+  }
+  linearVelocity -0.4 0.5 0
+}
+DEF BALL_YELLOW Solid {
+  translation 0.6 -1.3 0.10
+  children [
+    DEF BALL_YELLOW_SHAPE Shape {
+      appearance PBRAppearance {
+        baseColor 1 0.9 0
+        roughness 1
+        metalness 0
+      }
+      geometry Sphere {
+        radius 0.10
+      }
+    }
+  ]
+  name "ball_yellow"
+  contactMaterial "bouncy"
+  boundingObject USE BALL_YELLOW_SHAPE
+  physics Physics {
+    damping Damping {
+      linear 0
+      angular 0
+    }
+  }
+  linearVelocity -0.3 -0.4 0
+}
 DEF TB3 Robot {
   translation 0.33758421531546134 -9.037732154753078e-05 -0.0002474638509931057
   rotation -0.005089315702285569 -0.9990609035616214 -0.04302801227478682 0.00482275638599657
@@ -548,6 +623,6 @@ DEF TB3 Robot {
       -0.035 0 0.03
     ]
   }
-  controller "milestone3_controller"
+  controller "milestone3_v2"
   supervisor TRUE
 }
