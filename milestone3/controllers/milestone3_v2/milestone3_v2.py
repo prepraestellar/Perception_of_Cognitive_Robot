@@ -33,16 +33,16 @@ class GraphMap:
         key = self.world_to_grid(wx, wy)
         self.nodes[key] = min(1.0, self.nodes.get(key, 0.0) + increment)
 
-    def decay(self, rate=0.003):
-        """Subtract rate from every cell each step.
-        Real walls are re-mapped continuously and stay near 1.0.
-        Ball leaks (1-2 frames, probability 0.1-0.2) fade to 0 in ~70 steps (~2 s).
-        """
-        to_delete = [k for k, v in self.nodes.items() if v <= rate]
-        for k in to_delete:
-            del self.nodes[k]
-        for k in self.nodes:
-            self.nodes[k] = max(0.0, self.nodes[k] - rate)
+    # def decay(self, rate=0.003):
+    #     """Subtract rate from every cell each step.
+    #     Real walls are re-mapped continuously and stay near 1.0.
+    #     Ball leaks (1-2 frames, probability 0.1-0.2) fade to 0 in ~70 steps (~2 s).
+    #     """
+    #     to_delete = [k for k, v in self.nodes.items() if v <= rate]
+    #     for k in to_delete:
+    #         del self.nodes[k]
+    #     for k in self.nodes:
+    #         self.nodes[k] = max(0.0, self.nodes[k] - rate)
 
     def is_occupied(self, gx, gy, threshold=0.5):
         val = self.nodes.get((gx, gy))
@@ -54,7 +54,7 @@ class GraphMap:
 # =============================================================
 # PART 3: A* PATH FINDING
 # =============================================================
-def a_star(start, goal, graph_map, threshold=0.5, max_iter=5000):
+def a_star(start, goal, graph_map, threshold=0.5, max_iter=20000):
     """
     Finds a path from start to goal on the graph map.
     Returns list of (gx, gy) waypoints, or None if unreachable.
@@ -122,6 +122,10 @@ class MyRobot:
         self.display_w = self.display.getWidth()
         self.display_h = self.display.getHeight()
 
+        self.global_display = self.supervisor.getDevice('global_display')
+        self.gdisplay_w = self.global_display.getWidth()
+        self.gdisplay_h = self.global_display.getHeight()
+
         self.left_motor  = self.supervisor.getDevice('left wheel motor')
         self.right_motor = self.supervisor.getDevice('right wheel motor')
         self.left_motor.setPosition(float('inf'))
@@ -137,8 +141,9 @@ class MyRobot:
         # --- Systems ---
         self.graph_map  = GraphMap(resolution=0.05)
         self.prev_frame      = None
+        self.prev_pose = None
         self._blocked_buffer = []
-        self._BLOCK_HISTORY  = 5    # union of last 8 frames (~256 ms)
+        self._BLOCK_HISTORY  = 4   # union of last 12 frames (~384 ms)
 
         # Store starting grid cell for utility scoring
         rx, ry, _ = self.get_pose()
@@ -180,7 +185,7 @@ class MyRobot:
 
         # Convert blocked pixel columns → blocked angles (camera space)
         # px = (0.5 - angle/cam_hfov) * cam_w  →  angle = (0.5 - px/cam_w) * cam_hfov
-        blocked_angles = [(0.5 - px / cam_w) * cam_hfov for px in blocked_cols]
+       #locked_angles = [(0.5 - px / cam_w) * cam_hfov for px in blocked_cols]
 
         # Angular width of one camera pixel — used as match tolerance
         angle_per_pixel = cam_hfov / cam_w
@@ -193,15 +198,33 @@ class MyRobot:
             if abs(ray_angle) > cam_hfov / 2:
                 continue
 
-            # Skip if this ray angle matches a blocked (moving object) angle
-            if any(abs(ray_angle - ba) < angle_per_pixel for ba in blocked_angles):
-                continue
-
             # Skip bad readings
             if dist <= 0 or math.isinf(dist) or dist > 1.5:
                 continue
+            
+                # แปลง ray_angle → pixel column ที่ตรงกัน
+            px = (0.5 - ray_angle / cam_hfov) * cam_w
 
-            # Convert to world coordinates and add to map
+            # ตรวจว่า column นั้น blocked (dynamic object) ไหม
+            # เช็ค ±1 pixel เผื่อ alignment error
+            is_blocked = any(
+                int(px + offset) in blocked_cols
+                for offset in (-1, 0, 1)
+            )
+            if is_blocked:
+                continue   # ← ข้าม ray นี้ ไม่เพิ่มใส่ map
+
+            # Mark free cells along the ray
+            res = self.graph_map.resolution
+            steps = int(dist / res)
+            for s in range(1, steps):
+                fx = rx + (s * res) * math.cos(ryaw + ray_angle)
+                fy = ry - (s * res) * math.sin(ryaw + ray_angle)
+                key = self.graph_map.world_to_grid(fx, fy)
+                if key not in self.graph_map.nodes:
+                    self.graph_map.nodes[key] = 0.0  # free
+
+            # Mark wall cell at ray endpoint
             wx = rx + dist * math.cos(ryaw + ray_angle)
             wy = ry - dist * math.sin(ryaw + ray_angle)
             self.graph_map.add_to_map(wx, wy)
@@ -214,9 +237,11 @@ class MyRobot:
         robot_gx, robot_gy = self.graph_map.world_to_grid(rx, ry)
         cx, cy = self.display_w // 2, self.display_h // 2
 
-        # White background
-        self.display.setColor(0xFFFFFF)
+        # Light grey background = undiscovered
+        self.display.setColor(0xC0C0C0)
         self.display.fillRectangle(0, 0, self.display_w, self.display_h)
+
+        frontier_set = set(self._get_frontiers())
 
         # Draw each known cell
         for (gx, gy), occ in self.graph_map.nodes.items():
@@ -227,15 +252,63 @@ class MyRobot:
             if not (0 <= px < self.display_w and 0 <= py < self.display_h):
                 continue
             if occ >= 0.5:
-                self.display.setColor(0x000000)  # wall = black
+                self.display.setColor(0x000000)   # occupied = black
+            elif (gx, gy) in frontier_set:
+                self.display.setColor(0x00BFFF)   # frontier = light blue
             else:
-                gray = int(220 * (1 - occ / 0.5))
-                self.display.setColor((gray << 16) | (gray << 8) | gray)
+                self.display.setColor(0xFFFFFF)   # free = white
             self.display.drawPixel(px, py)
 
         # Robot = red dot at centre
         self.display.setColor(0xFF0000)
         self.display.fillRectangle(cx - 2, cy - 2, 4, 4)
+
+    # ----------------------------------------------------------
+    # GLOBAL MAP DISPLAY  (fixed-origin, full explored area)
+    # ----------------------------------------------------------
+    def draw_global_map(self):
+        if not self.graph_map.nodes:
+            return
+
+        keys = list(self.graph_map.nodes.keys())
+        min_gx = min(k[0] for k in keys)
+        max_gx = max(k[0] for k in keys)
+        min_gy = min(k[1] for k in keys)
+        max_gy = max(k[1] for k in keys)
+
+        span_x = max(max_gx - min_gx + 1, 1)
+        span_y = max(max_gy - min_gy + 1, 1)
+        scale  = min(self.gdisplay_w / span_y, self.gdisplay_h / span_x)
+        scale  = max(scale, 1.0)
+
+        # Light grey background = undiscovered
+        self.global_display.setColor(0xC0C0C0)
+        self.global_display.fillRectangle(0, 0, self.gdisplay_w, self.gdisplay_h)
+
+        frontier_set = set(self._get_frontiers())
+
+        sz = max(2, math.ceil(scale))
+        for (gx, gy), occ in self.graph_map.nodes.items():
+            px = int((gy - min_gy) * scale)
+            py = int((gx - min_gx) * scale)
+            if not (0 <= px < self.gdisplay_w and 0 <= py < self.gdisplay_h):
+                continue
+            if occ >= 0.5:
+                self.global_display.setColor(0x000000)   # occupied = black
+            elif (gx, gy) in frontier_set:
+                self.global_display.setColor(0x00BFFF)   # frontier = light blue
+            else:
+                self.global_display.setColor(0xFFFFFF)   # free = white
+            self.global_display.fillRectangle(px, py, sz, sz)
+
+        # Robot position in red
+        rx, ry, _ = self.get_pose()
+        rgx, rgy  = self.graph_map.world_to_grid(rx, ry)
+        rpx = int((rgy - min_gy) * scale)
+        rpy = int((rgx - min_gx) * scale)
+        dot = max(sz * 3, 5)
+        self.global_display.setColor(0xFF0000)
+        self.global_display.fillRectangle(rpx - dot // 2, rpy - dot // 2, dot, dot)
 
     # ----------------------------------------------------------
     # NAVIGATION MODE: TELEOP  (W/A/S/D, press M to go AUTO)
@@ -325,15 +398,17 @@ class MyRobot:
         # Group frontiers into connected regions
         regions = self._get_frontier_regions(frontiers)
 
-        # Pick best region using professor's utility formula
         target = self._choose_target(regions, robot_gx, robot_gy)
         if target is None:
+            self.left_motor.setVelocity(self.MAX_SPEED * 0.3)
+            self.right_motor.setVelocity(-self.MAX_SPEED * 0.3)
             return
 
         # Plan path with A*
         path = a_star((robot_gx, robot_gy), target, self.graph_map)
-        if path is None:
-            self.unreachable.add(target)
+        if not path:  # None (unreachable) or [] (already there)
+            self.current_path = [target]
+            self.target_grid  = target
         else:
             self.current_path = path
             self.target_grid  = target
@@ -378,45 +453,52 @@ class MyRobot:
                 regions.append(region)
         return regions
 
+    def _bfs_distances(self, start):
+        from collections import deque
+        DIRS = [(0,1),(0,-1),(1,0),(-1,0)]
+        dist = {start: 0}
+        q = deque([start])
+        while q:
+            cx, cy = q.popleft()
+            for dx, dy in DIRS:
+                nb = (cx+dx, cy+dy)
+                if nb not in dist and self.graph_map.is_occupied(nb[0], nb[1]) is False:
+                    dist[nb] = dist[(cx, cy)] + 1
+                    q.append(nb)
+        return dist
+
     def _choose_target(self, regions, robot_gx, robot_gy):
-        """
-        Score each region using professor's utility formula:
-            u = alpha * D - beta * T
-            D = Euclidean distance from start (rewards deep exploration)
-            T = Manhattan distance from robot  (penalises long travel)
-        Pick nearest cell of best-scoring region.
-        """
-        ALPHA = 1.0  # depth weight
-        BETA  = 0.5  # travel cost weight
+        ALPHA = 1.0
+        BETA  = 0.5
+
+        dist_map = self._bfs_distances((robot_gx, robot_gy))
 
         best_score  = -float('inf')
-        best_region = None
+        best_target = None
 
         for region in regions:
-            # Skip fully unreachable regions
-            if all(cell in self.unreachable for cell in region):
+            reachable = [(gx, gy) for gx, gy in region if (gx, gy) in dist_map]
+            if not reachable:
                 continue
 
-            score = 0.0
-            for gx, gy in region:
-                D = math.dist((gx, gy), self.start_grid)
-                T = abs(gx - robot_gx) + abs(gy - robot_gy)
-                score += ALPHA * D - BETA * T
+            T = min(dist_map[(gx, gy)] for gx, gy in reachable)
+            D = sum(math.dist((gx, gy), self.start_grid) for gx, gy in region)
+            score = ALPHA * D - BETA * T
 
             if score > best_score:
                 best_score  = score
-                best_region = region
+                best_target = min(reachable, key=lambda c: dist_map[c])
 
-        if best_region is None:
-            return None
-
-        # Return the cell in the best region nearest to the robot
-        return min(best_region,
-                   key=lambda c: abs(c[0] - robot_gx) + abs(c[1] - robot_gy))
+        return best_target
 
     def _follow_path(self, rx, ry, ryaw):
         """Drive toward the next waypoint in the path."""
         if not self.current_path:
+            return
+
+        gx, gy = self.current_path[0]
+        if self.graph_map.is_occupied(gx, gy) is True:
+            self.current_path = []  # waypoint became a wall — replan
             return
 
         gx, gy     = self.current_path[0]
@@ -451,6 +533,7 @@ class MyRobot:
         print(f"Milestone 3 v2 started — mode: {self.mode}")
         print("Controls: W/A/S/D = move, M = toggle mode")
         step = 0
+        self.prev_pose = None
 
         while self.supervisor.step(self.time_step) != -1:
             step += 1
@@ -458,7 +541,17 @@ class MyRobot:
             # 1. Camera → detect moving object columns
             img_raw      = self.camera.getImageArray()
             img          = np.array(img_raw, dtype=np.uint8).transpose(1, 0, 2)
-            blocked_cols = get_blocked_columns(self.prev_frame, img, self.camera.getWidth())
+            pose_now = self.get_pose()   # (x, y, yaw)
+            blocked_cols = get_blocked_columns(
+                self.prev_frame, img,
+                self.camera.getWidth(),
+                pose1=self.prev_pose,
+                pose2=pose_now,
+                cam_hfov=self.camera.getFov(),
+                lidar_ranges=self.lidar.getRangeImage(),
+                lidar_fov=self.lidar.getFov()
+            )
+            self.prev_pose  = pose_now
             self.prev_frame = img
 
             # Union of last _BLOCK_HISTORY frames so a stationary ball stays blocked
@@ -466,14 +559,17 @@ class MyRobot:
             if len(self._blocked_buffer) > self._BLOCK_HISTORY:
                 self._blocked_buffer.pop(0)
             effective_blocked = set().union(*self._blocked_buffer)
+            if step % 30 == 0:
+                print(f"[DBG] step={step}  blocked={len(effective_blocked)} cols")
 
             # 2. Update map (camera-gated LiDAR) then decay stale cells
             self.update_map(effective_blocked)
-            self.graph_map.decay()
+            #self.graph_map.decay()
 
-            # 3. Draw map every 5 steps
+            # 3. Draw maps every 5 steps
             if step % 5 == 0:
                 self.draw_map()
+                self.draw_global_map()
 
             # 4. Navigation
             if   self.mode == "TELEOP":  self.handle_teleop()

@@ -315,6 +315,11 @@ DEF TB3 Robot {
     }
     Display {
     }
+    Display {
+      name "global_display"
+      width 512
+      height 512
+    }
     Pose {
       translation -0.03 0 0.153
       children [
