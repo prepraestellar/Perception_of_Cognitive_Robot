@@ -33,23 +33,11 @@ class GraphMap:
         key = self.world_to_grid(wx, wy)
         self.nodes[key] = min(1.0, self.nodes.get(key, 0.0) + increment)
 
-    # def decay(self, rate=0.003):
-    #     """Subtract rate from every cell each step.
-    #     Real walls are re-mapped continuously and stay near 1.0.
-    #     Ball leaks (1-2 frames, probability 0.1-0.2) fade to 0 in ~70 steps (~2 s).
-    #     """
-    #     to_delete = [k for k, v in self.nodes.items() if v <= rate]
-    #     for k in to_delete:
-    #         del self.nodes[k]
-    #     for k in self.nodes:
-    #         self.nodes[k] = max(0.0, self.nodes[k] - rate)
-
     def is_occupied(self, gx, gy, threshold=0.5):
         val = self.nodes.get((gx, gy))
         if val is None:
             return None          # unknown cell
         return val >= threshold  # True = wall, False = free
-#wat
 
 # =============================================================
 # PART 3: A* PATH FINDING
@@ -133,10 +121,24 @@ class MyRobot:
         self.left_motor.setVelocity(0.0)
         self.right_motor.setVelocity(0.0)
 
-        # --- Odometry (Supervisor gives perfect pose) ---
-        self.robot_node  = self.supervisor.getSelf()
-        self.trans_field = self.robot_node.getField('translation')
-        self.rot_field   = self.robot_node.getField('rotation')
+        # --- Wheel encoders ---
+        self.left_encoder  = self.supervisor.getDevice('left wheel sensor')
+        self.right_encoder = self.supervisor.getDevice('right wheel sensor')
+        self.left_encoder.enable(self.time_step)
+        self.right_encoder.enable(self.time_step)
+
+        # --- Compass for heading ---
+        self.compass = self.supervisor.getDevice('compass')
+        self.compass.enable(self.time_step)
+
+        # --- Odometry state ---
+        self.wheel_radius   = 0.033
+        self.axle_length    = 0.160
+        self.x              = 0.0
+        self.y              = 0.0
+        self.theta          = 0.0
+        self.prev_left_enc  = 0.0
+        self.prev_right_enc = 0.0
 
         # --- Systems ---
         self.graph_map  = GraphMap(resolution=0.05)
@@ -150,22 +152,42 @@ class MyRobot:
         self.start_grid = self.graph_map.world_to_grid(rx, ry)
 
         # EXPLORE mode state
-        self.current_path      = []
-        self.target_grid       = None
-        self.unreachable       = set()
+        self.current_path = []
+        self.target_grid  = None
 
         # AUTO mode: committed turn to prevent oscillation
         self._avoid_timer = 0
         self._avoid_dir   = 1   # +1 = turn left, -1 = turn right
 
     # ----------------------------------------------------------
-    # POSE
+    # ODOMETRY + POSE
     # ----------------------------------------------------------
+    # Noise parameters
+    _ENC_NOISE_STD     = 0.002   # metres — Gaussian noise on each wheel displacement
+    _COMPASS_NOISE_STD = 0.02    # radians (~1.1°) — Gaussian noise on heading
+
+    def update_odometry(self):
+        left_enc  = self.left_encoder.getValue()
+        right_enc = self.right_encoder.getValue()
+        d_left  = (left_enc  - self.prev_left_enc)  * self.wheel_radius
+        d_right = (right_enc - self.prev_right_enc) * self.wheel_radius
+        self.prev_left_enc  = left_enc
+        self.prev_right_enc = right_enc
+
+        # Encoder noise
+        d_left  += np.random.normal(0.0, self._ENC_NOISE_STD)
+        d_right += np.random.normal(0.0, self._ENC_NOISE_STD)
+
+        # Compass heading + noise
+        cv = self.compass.getValues()
+        self.theta = math.atan2(cv[0], cv[1]) + np.random.normal(0.0, self._COMPASS_NOISE_STD)
+
+        d_center = (d_right + d_left) / 2.0
+        self.x += d_center * math.cos(self.theta)
+        self.y += d_center * math.sin(self.theta)
+
     def get_pose(self):
-        pos = self.trans_field.getSFVec3f()
-        rot = self.rot_field.getSFRotation()   # [ax, ay, az, angle]
-        yaw = -rot[3] if rot[2] > 0 else rot[3]
-        return float(pos[0]), float(pos[1]), yaw
+        return self.x, self.y, -self.theta
 
     # ----------------------------------------------------------
     # MAPPING  (camera-gated LiDAR)
@@ -183,13 +205,6 @@ class MyRobot:
         cam_hfov  = self.camera.getFov()  # ~1.085 rad (~62°)
         cam_w     = self.camera.getWidth()
 
-        # Convert blocked pixel columns → blocked angles (camera space)
-        # px = (0.5 - angle/cam_hfov) * cam_w  →  angle = (0.5 - px/cam_w) * cam_hfov
-       #locked_angles = [(0.5 - px / cam_w) * cam_hfov for px in blocked_cols]
-
-        # Angular width of one camera pixel — used as match tolerance
-        angle_per_pixel = cam_hfov / cam_w
-
         for i, dist in enumerate(ranges):
             # Angle of this ray relative to robot forward
             ray_angle = -lidar_fov / 2 + (i / (n - 1)) * lidar_fov
@@ -201,18 +216,14 @@ class MyRobot:
             # Skip bad readings
             if dist <= 0 or math.isinf(dist) or dist > 1.5:
                 continue
-            
-                # แปลง ray_angle → pixel column ที่ตรงกัน
+
+            # Map ray angle to camera pixel column
             px = (0.5 - ray_angle / cam_hfov) * cam_w
 
-            # ตรวจว่า column นั้น blocked (dynamic object) ไหม
-            # เช็ค ±1 pixel เผื่อ alignment error
-            is_blocked = any(
-                int(px + offset) in blocked_cols
-                for offset in (-1, 0, 1)
-            )
+            # Skip if column belongs to a detected moving object (±1 px tolerance)
+            is_blocked = any(int(px + offset) in blocked_cols for offset in (-1, 0, 1))
             if is_blocked:
-                continue   # ← ข้าม ray นี้ ไม่เพิ่มใส่ map
+                continue
 
             # Mark free cells along the ray
             res = self.graph_map.resolution
@@ -370,9 +381,9 @@ class MyRobot:
             self.mode = "TELEOP"
             print("Switched to TELEOP mode")
 
-    # ----------------------------------------------------------
-    # NAVIGATION MODE: EXPLORE  (A* + frontier, press M to go TELEOP)
-    # ----------------------------------------------------------
+    # =============================================================
+    # PART 5: EXPLORE MODE  (frontier-based A* navigation)
+    # =============================================================
     def handle_explore(self):
         if self.keyboard.getKey() == ord('M'):
             self.mode = "TELEOP"
@@ -414,8 +425,8 @@ class MyRobot:
             self.target_grid  = target
 
     def _get_frontiers(self):
-        """Free cells that have at least one unknown neighbour."""
-        DIRS = [(0,1),(0,-1),(1,0),(-1,0),(1,1),(1,-1),(-1,1),(-1,-1)]
+        """Free cells that have at least one unknown 4-connected neighbour."""
+        DIRS = [(0,1),(0,-1),(1,0),(-1,0)]
         frontiers = []
         for (gx, gy), occ in self.graph_map.nodes.items():
             if occ >= 0.5:
@@ -524,8 +535,6 @@ class MyRobot:
             self.left_motor.setVelocity(self.MAX_SPEED * 0.6)
             self.right_motor.setVelocity(self.MAX_SPEED * 0.6)
 
-
-
     # ----------------------------------------------------------
     # MAIN LOOP
     # ----------------------------------------------------------
@@ -533,10 +542,12 @@ class MyRobot:
         print(f"Milestone 3 v2 started — mode: {self.mode}")
         print("Controls: W/A/S/D = move, M = toggle mode")
         step = 0
-        self.prev_pose = None
 
         while self.supervisor.step(self.time_step) != -1:
             step += 1
+
+            # 0. Update odometry (encoders + compass)
+            self.update_odometry()
 
             # 1. Camera → detect moving object columns
             img_raw      = self.camera.getImageArray()
@@ -562,9 +573,8 @@ class MyRobot:
             if step % 30 == 0:
                 print(f"[DBG] step={step}  blocked={len(effective_blocked)} cols")
 
-            # 2. Update map (camera-gated LiDAR) then decay stale cells
+            # 2. Update map (camera-gated LiDAR)
             self.update_map(effective_blocked)
-            #self.graph_map.decay()
 
             # 3. Draw maps every 5 steps
             if step % 5 == 0:
