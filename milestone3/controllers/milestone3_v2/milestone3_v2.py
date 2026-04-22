@@ -1,7 +1,7 @@
 import math
 import heapq
 import numpy as np
-from controller import Supervisor
+from controller import Supervisor, Display
 from motion_detection import get_blocked_columns
 
 # =============================================================
@@ -29,7 +29,7 @@ class GraphMap:
         wy = gy * self.resolution + self.resolution / 2
         return (wx, wy)
 
-    def add_to_map(self, wx, wy, increment=0.1):
+    def add_to_map(self, wx, wy, increment=0.01):
         key = self.world_to_grid(wx, wy)
         self.nodes[key] = min(1.0, self.nodes.get(key, 0.0) + increment)
 
@@ -102,6 +102,8 @@ class MyRobot:
 
         self.camera = self.supervisor.getDevice('camera')
         self.camera.enable(self.time_step)
+        self.camera_w = self.camera.getWidth()
+        self.camera_h = self.camera.getHeight()
 
         self.keyboard = self.supervisor.getKeyboard()
         self.keyboard.enable(self.time_step)
@@ -113,6 +115,14 @@ class MyRobot:
         self.global_display = self.supervisor.getDevice('global_display')
         self.gdisplay_w = self.global_display.getWidth()
         self.gdisplay_h = self.global_display.getHeight()
+
+        self.motion_display = self.supervisor.getDevice('motion_display')
+        if self.motion_display is not None:
+            self.mdisplay_w = self.motion_display.getWidth()
+            self.mdisplay_h = self.motion_display.getHeight()
+        else:
+            self.mdisplay_w = 0
+            self.mdisplay_h = 0
 
         self.left_motor  = self.supervisor.getDevice('left wheel motor')
         self.right_motor = self.supervisor.getDevice('right wheel motor')
@@ -131,6 +141,13 @@ class MyRobot:
         self.compass = self.supervisor.getDevice('compass')
         self.compass.enable(self.time_step)
 
+        # --- IMU heading source (optional); fallback stays compass ---
+        self.imu = self.supervisor.getDevice('inertial unit')
+        if self.imu is not None:
+            self.imu.enable(self.time_step)
+        self._imu_yaw_offset = 0.0
+        self._imu_calibrated = False
+
         # --- Odometry state ---
         self.wheel_radius   = 0.033
         self.axle_length    = 0.160
@@ -139,6 +156,10 @@ class MyRobot:
         self.theta          = 0.0
         self.prev_left_enc  = 0.0
         self.prev_right_enc = 0.0
+
+        # EKF state [x, y, theta] and covariance.
+        self._ekf_state = np.array([self.x, self.y, self.theta], dtype=np.float64)
+        self._ekf_cov   = np.diag([1e-3, 1e-3, 2e-3]).astype(np.float64)
 
         # --- Systems ---
         self.graph_map  = GraphMap(resolution=0.05)
@@ -164,7 +185,38 @@ class MyRobot:
     # ----------------------------------------------------------
     # Noise parameters
     _ENC_NOISE_STD     = 0.002   # metres — Gaussian noise on each wheel displacement
-    _COMPASS_NOISE_STD = 0.02    # radians (~1.1°) — Gaussian noise on heading
+    _IMU_NOISE_STD     = 0.02    # radians (~1.1°) — Gaussian noise on heading sensor
+
+    # EKF tuning (variance terms)
+    _KF_Q_XY_BASE      = 2e-4
+    _KF_Q_XY_SCALE     = 4e-3
+    _KF_Q_TH_BASE      = 4e-4
+    _KF_Q_TH_SCALE     = 4e-3
+    _KF_R_HEADING_MIN  = 1e-4
+
+    @staticmethod
+    def _wrap_angle(angle):
+        return math.atan2(math.sin(angle), math.cos(angle))
+
+    def _read_heading_measurement(self):
+        """
+        Heading measurement for EKF correction.
+        Prefer inertial unit yaw when available, aligned to compass frame once.
+        """
+        if self.imu is not None and hasattr(self.imu, 'getRollPitchYaw'):
+            rpy = self.imu.getRollPitchYaw()
+            imu_yaw = self._wrap_angle(-rpy[2])
+
+            if not self._imu_calibrated:
+                cv = self.compass.getValues()
+                compass_yaw = self._wrap_angle(math.atan2(cv[0], cv[1]))
+                self._imu_yaw_offset = self._wrap_angle(compass_yaw - imu_yaw)
+                self._imu_calibrated = True
+
+            return self._wrap_angle(imu_yaw + self._imu_yaw_offset)
+
+        cv = self.compass.getValues()
+        return self._wrap_angle(math.atan2(cv[0], cv[1]))
 
     def update_odometry(self):
         left_enc  = self.left_encoder.getValue()
@@ -178,13 +230,46 @@ class MyRobot:
         d_left  += np.random.normal(0.0, self._ENC_NOISE_STD)
         d_right += np.random.normal(0.0, self._ENC_NOISE_STD)
 
-        # Compass heading + noise
-        cv = self.compass.getValues()
-        self.theta = math.atan2(cv[0], cv[1]) + np.random.normal(0.0, self._COMPASS_NOISE_STD)
-
+        # 1) Prediction from wheel encoders (odometry model).
         d_center = (d_right + d_left) / 2.0
-        self.x += d_center * math.cos(self.theta)
-        self.y += d_center * math.sin(self.theta)
+        d_theta  = (d_right - d_left) / self.axle_length
+
+        x, y, theta = self._ekf_state
+        theta_mid   = theta + 0.5 * d_theta
+
+        x_pred     = x + d_center * math.cos(theta_mid)
+        y_pred     = y + d_center * math.sin(theta_mid)
+        theta_pred = self._wrap_angle(theta + d_theta)
+        state_pred = np.array([x_pred, y_pred, theta_pred], dtype=np.float64)
+
+        F = np.array([
+            [1.0, 0.0, -d_center * math.sin(theta_mid)],
+            [0.0, 1.0,  d_center * math.cos(theta_mid)],
+            [0.0, 0.0, 1.0],
+        ], dtype=np.float64)
+
+        q_xy = self._KF_Q_XY_BASE + abs(d_center) * self._KF_Q_XY_SCALE
+        q_th = self._KF_Q_TH_BASE + abs(d_theta)  * self._KF_Q_TH_SCALE
+        Q = np.diag([q_xy, q_xy, q_th])
+
+        cov_pred = F @ self._ekf_cov @ F.T + Q
+
+        # 2) Correction from IMU/compass heading.
+        heading_meas = self._read_heading_measurement()
+        heading_meas = self._wrap_angle(heading_meas + np.random.normal(0.0, self._IMU_NOISE_STD))
+
+        H = np.array([[0.0, 0.0, 1.0]], dtype=np.float64)
+        R = max(self._KF_R_HEADING_MIN, self._IMU_NOISE_STD ** 2)
+
+        innovation = self._wrap_angle(heading_meas - theta_pred)
+        S = float((H @ cov_pred @ H.T)[0, 0] + R)
+        K = (cov_pred @ H.T) / S
+
+        self._ekf_state = state_pred + K[:, 0] * innovation
+        self._ekf_state[2] = self._wrap_angle(self._ekf_state[2])
+        self._ekf_cov = (np.eye(3) - K @ H) @ cov_pred
+
+        self.x, self.y, self.theta = self._ekf_state.tolist()
 
     def get_pose(self):
         return self.x, self.y, -self.theta
@@ -320,6 +405,65 @@ class MyRobot:
         dot = max(sz * 3, 5)
         self.global_display.setColor(0xFF0000)
         self.global_display.fillRectangle(rpx - dot // 2, rpy - dot // 2, dot, dot)
+
+    def draw_motion_display(self, frame_bgra, blocked_cols, effective_blocked):
+        """
+        Draw live camera view, then overlay motion columns:
+        - red: buffered columns used by mapping
+        - green: columns detected in current frame
+        """
+        if self.motion_display is None:
+            return
+
+        cam_h, cam_w = frame_bgra.shape[:2]
+        if self.mdisplay_w == cam_w and self.mdisplay_h == cam_h:
+            bgra_bytes = frame_bgra.tobytes()
+        else:
+            # Nearest-neighbor resize so camera content fits the motion display.
+            x_idx = (np.arange(self.mdisplay_w) * cam_w / self.mdisplay_w).astype(np.int32)
+            y_idx = (np.arange(self.mdisplay_h) * cam_h / self.mdisplay_h).astype(np.int32)
+            scaled = frame_bgra[y_idx[:, None], x_idx[None, :], :]
+            bgra_bytes = np.ascontiguousarray(scaled).tobytes()
+
+        image_ref = self.motion_display.imageNew(
+            bgra_bytes,
+            Display.BGRA,
+            self.mdisplay_w,
+            self.mdisplay_h,
+        )
+        self.motion_display.imagePaste(image_ref, 0, 0, False)
+        self.motion_display.imageDelete(image_ref)
+
+        cam_w = max(cam_w, 1)
+
+        # Buffered detections used for mapping.
+        self.motion_display.setColor(0xFF4040)
+        for col in effective_blocked:
+            x = int(col * self.mdisplay_w / cam_w)
+            if 0 <= x < self.mdisplay_w:
+                self.motion_display.drawLine(x, 0, x, self.mdisplay_h - 1)
+
+        # Current-frame detections.
+        self.motion_display.setColor(0x00FF66)
+        band_h = max(2, self.mdisplay_h // 6)
+        for col in blocked_cols:
+            x = int(col * self.mdisplay_w / cam_w)
+            if 0 <= x < self.mdisplay_w:
+                self.motion_display.drawLine(x, 0, x, band_h)
+
+        # Camera center column marker.
+        cx = self.mdisplay_w // 2
+        self.motion_display.setColor(0xFFD700)
+        self.motion_display.drawLine(cx, 0, cx, self.mdisplay_h - 1)
+
+        self.motion_display.setColor(0x000000)
+        self.motion_display.fillRectangle(0, 0, 130, 18)
+        self.motion_display.setColor(0xFFFFFF)
+        self.motion_display.drawText(
+            f"R buf:{len(effective_blocked)} G now:{len(blocked_cols)}",
+            2,
+            2,
+        )
 
     # ----------------------------------------------------------
     # NAVIGATION MODE: TELEOP  (W/A/S/D, press M to go AUTO)
@@ -550,12 +694,14 @@ class MyRobot:
             self.update_odometry()
 
             # 1. Camera → detect moving object columns
-            img_raw      = self.camera.getImageArray()
-            img          = np.array(img_raw, dtype=np.uint8).transpose(1, 0, 2)
+            img_raw = self.camera.getImage()
+            if img_raw is None:
+                continue
+            img = np.frombuffer(img_raw, dtype=np.uint8).reshape((self.camera_h, self.camera_w, 4))
             pose_now = self.get_pose()   # (x, y, yaw)
             blocked_cols = get_blocked_columns(
                 self.prev_frame, img,
-                self.camera.getWidth(),
+                self.camera_w,
                 pose1=self.prev_pose,
                 pose2=pose_now,
                 cam_hfov=self.camera.getFov(),
@@ -563,7 +709,7 @@ class MyRobot:
                 lidar_fov=self.lidar.getFov()
             )
             self.prev_pose  = pose_now
-            self.prev_frame = img
+            self.prev_frame = img.copy()
 
             # Union of last _BLOCK_HISTORY frames so a stationary ball stays blocked
             self._blocked_buffer.append(blocked_cols)
@@ -572,6 +718,9 @@ class MyRobot:
             effective_blocked = set().union(*self._blocked_buffer)
             if step % 30 == 0:
                 print(f"[DBG] step={step}  blocked={len(effective_blocked)} cols")
+
+            # Debug view of motion detection output.
+            self.draw_motion_display(img, blocked_cols, effective_blocked)
 
             # 2. Update map (camera-gated LiDAR)
             self.update_map(effective_blocked)
@@ -591,5 +740,5 @@ class MyRobot:
 # ENTRY POINT
 # =============================================================
 if __name__ == "__main__":
-    MODE = "AUTO"   # Change to "EXPLORE" to enable A* frontier navigation
+    MODE = "TELEOP"   # Change to "EXPLORE" to enable A* frontier navigation
     MyRobot(mode=MODE).run()
