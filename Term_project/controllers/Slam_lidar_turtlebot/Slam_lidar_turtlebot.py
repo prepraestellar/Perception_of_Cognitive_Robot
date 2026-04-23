@@ -89,7 +89,7 @@ class MyRobot:
         # Lidar sensors
         self.lidar = self.robot.getDevice('LDS-01')
         self.lidar.enable(self.time_step)
-        self.lidar.enablePointCloud()
+        # self.lidar.enablePointCloud()
 
         self.display = self.robot.getDevice('display')
         self.keyboard = self.robot.getKeyboard()
@@ -100,12 +100,14 @@ class MyRobot:
         self._last_map_binary = None
         self._prev_robot_cell = None
         self._last_display_size = None
+        self.path_history = []
 
     def setmap(self, size: tuple, world_size_m: tuple) -> Map:
         self.map = Map(size, world_size_m)
         self._display_cache_initialized = False
         self._last_map_binary = None
         self._prev_robot_cell = None
+        self.path_history = []
         return self.map
 
     def draw_map(self, threshold=0.5):
@@ -136,6 +138,15 @@ class MyRobot:
         )
 
         current_binary = self.map.map >= threshold
+        
+        # Helper to draw line segment between two map points
+        def draw_trace_segment(p1, p2):
+            x1 = int(p1[1] * cell_w + cell_w / 2)
+            y1 = int(p1[0] * cell_h + cell_h / 2)
+            x2 = int(p2[1] * cell_w + cell_w / 2)
+            y2 = int(p2[0] * cell_h + cell_h / 2)
+            self.display.setColor(0xFFAAAA) # Light red trace
+            self.display.drawLine(x1, y1, x2, y2)
 
         if needs_reset:
             self.display.setColor(0xFFFFFF)
@@ -144,6 +155,11 @@ class MyRobot:
             self._display_cache_initialized = True
             self._prev_robot_cell = None
             self._last_display_size = (dw, dh)
+            
+            # Redraw full trace on reset
+            if len(self.path_history) > 1:
+                for i in range(len(self.path_history) - 1):
+                    draw_trace_segment(self.path_history[i], self.path_history[i+1])
 
         # Draw only cells whose occupancy changed since last frame.
         changed = current_binary != self._last_map_binary
@@ -171,11 +187,23 @@ class MyRobot:
                 else:
                     self.display.setColor(0xFFFFFF)
                 self.display.fillRectangle(prev_x, prev_y, px_w, px_h)
+                
+                # Redraw the trace connected to this cell to fix gaps created by clearing
+                if len(self.path_history) >= 2:
+                    draw_trace_segment(self.path_history[-2], self.path_history[-1])
 
         # Draw the robot position (red).
         rx, ry = self.convert_to_map_coordinates(self.get_current_position())
         
         if 0 <= rx < rows and 0 <= ry < cols:
+            new_cell = (rx, ry)
+            
+             # Update path history and draw new trace segment
+            if not self.path_history or self.path_history[-1] != new_cell:
+                if self.path_history:
+                    draw_trace_segment(self.path_history[-1], new_cell)
+                self.path_history.append(new_cell)
+
             robot_x = int(ry * cell_w) # Map ry (col) to x_pixel
             robot_y = int(rx * cell_h) # Map rx (row) to y_pixel
             self.display.setColor(0xFF0000)
@@ -192,8 +220,8 @@ class MyRobot:
         return vr, vl
     
     def random_direction(self):
-        # return np.random.choice(['s', 'e', 'w', 'nw', 'ne', 'sw', 'se'])
-        return np.random.choice(['s', 'sw', 'se'])
+        return np.random.choice(['s', 'e', 'w', 'nw', 'ne', 'sw', 'se'])
+        # return np.random.choice(['s', 'sw', 'se'])
     
     def mapping(self, iteration, verbose=100, teleop=False, show_display=True, proba_increase=0.1, threshold=0.5):
         if teleop:
@@ -214,7 +242,7 @@ class MyRobot:
                         key = k
                         k = self.keyboard.getKey() # Updated inside the loop to avoid infinite loop
 
-                    # --- WEBOTS KEYBOARD INTERRUPT ---
+                    # KEYBOARD INTERRUPT ---
                     # If 'Q' is the last key pressed, stop teleop mapping
                     if key in (ord('Q'), ord('q')):
                         print("\nTeleop mapping stopped manually via Webots (Q pressed). Continuing...")
@@ -331,35 +359,28 @@ class MyRobot:
             return self.map
 
     def read_distance_sensors(self):
-        # Read the 682 distance points from the LiDAR (returns values in exact meters)
-        self.lidar_values = self.lidar.getRangeImage()
+        # Read the 360 distance points from the LiDAR (returns values in exact meters)
+        noise = np.random.normal(-0.1, 0.1, size=360)  # Simulate small noise in measurements
+        self.lidar_values = self.lidar.getRangeImage() + noise
 
     def check_obstacle(self) -> bool:
         # Assuming the front of the robot is the center of the lidar_values array
         # Check only a narrow cone in front of the robot
         num_points = len(self.lidar_values)
         front_cone = self.lidar_values[num_points//2 - 50 : num_points//2 + 50] 
-        return any(0 < v < 0.3 for v in front_cone if not np.isinf(v))
+        return any(0 < v < 0.4 for v in front_cone if not np.isinf(v))
 
     def get_current_position(self) -> tuple[float, float]:
         if self.use_supervisor:
             position = self.trans_field.getSFVec3f()
-            return (float(position[0]), float(position[1]))
+            noise_x = np.random.normal(-0.1, 0.1)  # Simulate small noise in X position
+            noise_y = np.random.normal(-0.1, 0.1)  # Simulate
+            position = (float(position[0]) + noise_x, float(position[1]) + noise_y)
+            return position
         else:
             return (self.x, self.y)
 
     def update_odometry(self):
-        # Temporary debug — remove after
-        # compass_vals = self.compass.getValues()
-        # rot = self.rot_field.getSFRotation()
-        # supervisor_yaw = -rot[3] if rot[2] > 0 else rot[3]
-        # compass_yaw = -math.atan2(compass_vals[0], compass_vals[1])
-        # print("-"*50)
-        # print(f"compass raw:     {compass_vals}")
-        # print(f"rot raw:         {rot}")
-        # print(f"supervisor yaw:  {math.degrees(supervisor_yaw):.2f} deg")
-        # print(f"compass yaw:     {math.degrees(compass_yaw):.2f} deg")
-
         # 1. Read encoders
         left_enc  = self.left_encoder.getValue()
         right_enc = self.right_encoder.getValue()
@@ -382,35 +403,6 @@ class MyRobot:
         self.y += d_center * math.sin(self.theta)
     
     def get_wall_position(self) -> list[tuple[float, float]]:
-        # if not hasattr(self, 'lidar_values') or self.lidar_values is None:
-        #     return []
-    
-        # wall_positions = []
-        # robot_position = self.get_current_position() # Returns (World X, World Y)
-        
-        # # Get robot yaw (rotation around the vertical Y-axis)
-        # rot = self.rot_field.getSFRotation()  # [ax, ay, az, angle]
-        # robot_yaw = -rot[3] if rot[2] > 0 else rot[3]  
-
-        
-        # fov = self.lidar.getFov()
-        # num_points = len(self.lidar_values)
-        
-        
-        # for i, distance in enumerate(self.lidar_values):
-        #     # Only map valid hits (ignore infinity, zero, or sensor errors)
-        #     if distance > 0 and not np.isinf(distance) and not np.isnan(distance):
-                
-        #         # 1. Find the angle of this specific ray relative to the robot
-        #         ray_angle = -(fov / 2) + (i / (num_points - 1)) * fov
-        #         global_angle = robot_yaw + ray_angle
-                
-        #         wall_x = robot_position[0] + distance * np.cos(global_angle)
-        #         wall_y = robot_position[1] - distance * np.sin(global_angle) 
-                
-        #         # Append as (X, Y) to match your convert_to_map_coordinates function
-        #         wall_positions.append((wall_x, wall_y))
-        # return wall_positions
         if not hasattr(self, 'lidar_values') or self.lidar_values is None:
             return []
             
@@ -420,14 +412,7 @@ class MyRobot:
         if num_points == 0:
             return []
 
-        robot_position = self.get_current_position() # Returns (World X, World Y)
-        
-        # Get robot yaw with odom / supervisor
-        #if self.use_supervisor:
-        ##rot = self.rot_field.getSFRotation()
-        ##robot_yaw = -rot[3] if rot[2] > 0 else rot[3]
-        #else:
-        #    robot_yaw = self.theta
+        robot_position = self.get_current_position() 
         if self.use_supervisor:
             rot = self.rot_field.getSFRotation()
             robot_yaw = -rot[3] if rot[2] > 0 else rot[3]
@@ -439,8 +424,6 @@ class MyRobot:
         # 2. Create a boolean mask of only the valid laser hits
         valid_mask = (distances > 0) & ~np.isinf(distances) & ~np.isnan(distances)
         
-        # 3. Generate all ray angles at once using linspace
-        # This replaces: -(fov / 2) + (i / (num_points - 1)) * fov
         all_ray_angles = np.linspace(-fov / 2, fov / 2, num_points)
         
         # 4. Filter the distances and angles using our mask
@@ -469,7 +452,7 @@ class MyRobot:
 if __name__ == "__main__":
     supervisor = Supervisor()
     turtle_bot = MyRobot(wheel_radius=0.033, axle_length=0.16, bot=supervisor, supervisor=supervisor, use_supervisor=False)
-    turtle_bot.setmap(size=(1000, 1000), world_size_m=(4.0, 4.0))
-    world_map = turtle_bot.mapping(iteration=100000, verbose=100, teleop=False, show_display=True, proba_increase=0.1, threshold=0.95)
-    turtle_bot.draw_map(threshold=0.1) # Final map visualization with a threshold for occupied cells
+    turtle_bot.setmap(size=(3000, 3000), world_size_m=(6.0, 6.0))
+    world_map = turtle_bot.mapping(iteration=1000000, verbose=100, teleop=False, show_display=True , proba_increase=0.1, threshold=0.3)
+    turtle_bot.draw_map(threshold=0.95) 
     print('done')

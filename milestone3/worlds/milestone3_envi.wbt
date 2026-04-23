@@ -3,7 +3,6 @@
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackground.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/floors/protos/RectangleArena.proto"
-EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/hospital/protos/EmergencyExitSign.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/appearances/protos/Parquetry.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/devices/robotis/protos/RobotisLds01.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/appearances/protos/TireRubber.proto"
@@ -22,7 +21,7 @@ WorldInfo {
 }
 Viewpoint {
   orientation -0.18209606198981812 0.04820693894462702 0.9820983225957517 2.9913680635252007
-  position 4.031700209094622 -0.5591464341582193 1.5226860002757507
+  position 9.022031053920625 -1.25958971509033 3.4850505673881953
 }
 TexturedBackground {
   texture "twilight_cloudy_empty"
@@ -165,6 +164,7 @@ DEF BALL Solid {
   contactMaterial "bouncy"
   boundingObject USE BALL1
   physics Physics {
+    friction 0
   }
 }
 Solid {
@@ -183,11 +183,8 @@ Solid {
   contactMaterial "bouncy"
   boundingObject USE BALL2
   physics Physics {
+    friction 0
   }
-}
-EmergencyExitSign {
-  translation -0.192141 1.05121 0.0800011
-  rotation 0.5773509358554485 0.5773489358556708 0.5773509358554485 2.0944
 }
 Solid {
   translation -0.706718 0.8081105276152116 0.07468157410959511
@@ -232,7 +229,7 @@ Solid {
   }
 }
 DEF BALL_RED Solid {
-  translation 1.0 0.3 0.10
+  translation 1 0.3 0.1
   children [
     DEF BALL_RED_SHAPE Shape {
       appearance PBRAppearance {
@@ -241,7 +238,7 @@ DEF BALL_RED Solid {
         metalness 0
       }
       geometry Sphere {
-        radius 0.10
+        radius 0.1
       }
     }
   ]
@@ -249,15 +246,15 @@ DEF BALL_RED Solid {
   contactMaterial "bouncy"
   boundingObject USE BALL_RED_SHAPE
   physics Physics {
+    friction 0
     damping Damping {
       linear 0
       angular 0
     }
   }
-  linearVelocity 0.4 0.3 0
 }
 DEF BALL_BLUE Solid {
-  translation -1.2 -1.0 0.10
+  translation -1.2 -1 0.1
   children [
     DEF BALL_BLUE_SHAPE Shape {
       appearance PBRAppearance {
@@ -266,7 +263,7 @@ DEF BALL_BLUE Solid {
         metalness 0
       }
       geometry Sphere {
-        radius 0.10
+        radius 0.1
       }
     }
   ]
@@ -274,15 +271,15 @@ DEF BALL_BLUE Solid {
   contactMaterial "bouncy"
   boundingObject USE BALL_BLUE_SHAPE
   physics Physics {
+    friction 0
     damping Damping {
       linear 0
       angular 0
     }
   }
-  linearVelocity -0.4 0.5 0
 }
 DEF BALL_YELLOW Solid {
-  translation 0.6 -1.3 0.10
+  translation 0.6 -1.3 0.1
   children [
     DEF BALL_YELLOW_SHAPE Shape {
       appearance PBRAppearance {
@@ -291,7 +288,7 @@ DEF BALL_YELLOW Solid {
         metalness 0
       }
       geometry Sphere {
-        radius 0.10
+        radius 0.1
       }
     }
   ]
@@ -299,17 +296,20 @@ DEF BALL_YELLOW Solid {
   contactMaterial "bouncy"
   boundingObject USE BALL_YELLOW_SHAPE
   physics Physics {
+    friction 0
     damping Damping {
       linear 0
       angular 0
     }
   }
-  linearVelocity -0.3 -0.4 0
 }
 DEF TB3 Robot {
   translation 0.33758421531546134 -9.037732154753078e-05 -0.0002474638509931057
   rotation -0.005089315702285569 -0.9990609035616214 -0.04302801227478682 0.00482275638599657
   children [
+    Display {
+      name "motion_display"
+    }
     Camera {
       translation 0.06 0 0.1
     }
@@ -345,8 +345,8 @@ DEF TB3 Robot {
         }
       ]
       endPoint Solid {
-        translation -4.637880924015429e-06 -0.08011936548241533 0.03299952211362465
-        rotation 0.0037433829628498666 -0.999990306124112 0.0023183489379973964 0.512341371369436
+        translation -4.6378809240177385e-06 -0.08011936548241533 0.03299952211362465
+        rotation 0.003743382962849866 -0.999990306124112 0.0023183489379973964 0.512341371369436
         children [
           DEF RIGHT_WHEEL Pose {
             rotation 1 0 0 -1.5708003061004252
@@ -443,7 +443,7 @@ DEF TB3 Robot {
       ]
       endPoint Solid {
         translation 0 0.08 0.033
-        rotation 0.3414481884614959 -2.108190699662694e-06 -0.939900598250644 3.141590684319406
+        rotation 0.3414481884614959 -2.108190699680418e-06 -0.939900598250644 3.141590684319406
         children [
           DEF RIGHT_WHEEL Pose {
             rotation 1 0 0 -1.5708003061004252
@@ -477,8 +477,8 @@ DEF TB3 Robot {
         anchor -0.081 0 0.004
       }
       endPoint Solid {
-        translation -0.08099707385519525 7.186822871763534e-07 0.004011961171404664
-        rotation 0.24227409379593307 -0.970198373324491 -0.0042871755120275105 6.04072105130919
+        translation -0.08099707385519525 7.186822871761354e-07 0.004011961171404664
+        rotation 0.2422740937959509 -0.9701983733244864 -0.004287175512027533 6.040721051309201
         children [
           Shape {
             appearance PBRAppearance {
