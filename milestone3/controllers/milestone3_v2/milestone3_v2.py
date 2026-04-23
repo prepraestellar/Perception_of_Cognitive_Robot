@@ -13,7 +13,7 @@ from controller import Supervisor
 from motion_detection import get_blocked_columns
 
 # Import modular libraries
-from graph_map_lib import GraphMap, a_star
+from graph_map_lib import GraphMap
 from odometry_lib import OdometryEKF
 from sensor_noise_lib import LiDARNoise, CameraNoise
 from mapping_lib import Mapper
@@ -35,19 +35,22 @@ class MyRobot:
         self.mode = mode
         self.use_kalman = use_kalman
 
-        # ===== DEVICES =====
+        # Lidar
         self.lidar = self.supervisor.getDevice('LDS-01')
         self.lidar.enable(self.time_step)
         self._lidar_max_range = self.lidar.getMaxRange() if hasattr(self.lidar, 'getMaxRange') else 3.5
 
+        # Camera
         self.camera = self.supervisor.getDevice('camera')
         self.camera.enable(self.time_step)
         self.camera_w = self.camera.getWidth()
         self.camera_h = self.camera.getHeight()
 
+        # Keyboard
         self.keyboard = self.supervisor.getKeyboard()
         self.keyboard.enable(self.time_step)
 
+        # Motors
         self.left_motor = self.supervisor.getDevice('left wheel motor')
         self.right_motor = self.supervisor.getDevice('right wheel motor')
         self.left_motor.setPosition(float('inf'))
@@ -55,11 +58,13 @@ class MyRobot:
         self.left_motor.setVelocity(0.0)
         self.right_motor.setVelocity(0.0)
 
+        # Motor Encoders
         self.left_encoder = self.supervisor.getDevice('left wheel sensor')
         self.right_encoder = self.supervisor.getDevice('right wheel sensor')
         self.left_encoder.enable(self.time_step)
         self.right_encoder.enable(self.time_step)
 
+        # Compass and IMU
         self.compass = self.supervisor.getDevice('compass')
         self.compass.enable(self.time_step)
 
@@ -67,6 +72,7 @@ class MyRobot:
         if self.imu is not None:
             self.imu.enable(self.time_step)
 
+        # Displays
         display = self.supervisor.getDevice('display')
         global_display = self.supervisor.getDevice('global_display')
         motion_display = self.supervisor.getDevice('motion_display')
@@ -114,7 +120,6 @@ class MyRobot:
         print(f"Milestone 3 v2 started — mode: {self.mode}")
         kalman_str = "ON (EKF fusion)" if self.use_kalman else "OFF (trust sensors)"
         print(f"Controls: W/A/S/D = move, M = toggle mode, K = toggle Kalman ({kalman_str})")
-        print("Modules: graph_map_lib, odometry_lib, sensor_noise_lib, mapping_lib, display_lib, navigation_lib")
         step = 0
 
         while self.supervisor.step(self.time_step) != -1:
@@ -182,34 +187,23 @@ class MyRobot:
                 if key == ord('M'):
                     self.mode = "AUTO"
                     print("Switched to AUTO mode")
-                elif key == ord('K'):
-                    self.use_kalman = not self.use_kalman
-                    mode_str = "ON (EKF fusion)" if self.use_kalman else "OFF (trust sensors)"
-                    print(f"Kalman filter toggled {mode_str}")
 
             elif self.mode == "AUTO":
                 key = self.navigator.handle_auto(noisy_lidar_ranges)
                 if key == ord('M'):
                     self.mode = "TELEOP"
                     print("Switched to TELEOP mode")
-                elif key == ord('K'):
-                    self.use_kalman = not self.use_kalman
-                    mode_str = "ON (EKF fusion)" if self.use_kalman else "OFF (trust sensors)"
-                    print(f"Kalman filter toggled {mode_str}")
+        
 
             elif self.mode == "EXPLORE":
                 key = self.navigator.handle_explore(rx, ry, ryaw)
                 if key == ord('M'):
                     self.mode = "TELEOP"
                     print("Switched to TELEOP mode")
-                elif key == ord('K'):
-                    self.use_kalman = not self.use_kalman
-                    mode_str = "ON (EKF fusion)" if self.use_kalman else "OFF (trust sensors)"
-                    print(f"Kalman filter toggled {mode_str}")
 # =============================================================
 # ENTRY POINT
 # =============================================================
 if __name__ == "__main__":
     MODE = "AUTO"  # Change to "EXPLORE" or "TELEOP" as needed
-    MyRobot(mode=MODE, use_kalman=False).run()
+    MyRobot(mode=MODE, use_kalman=True).run()
 
